@@ -34,8 +34,11 @@ fork that carries these changes:
 git clone --recurse-submodules -b pc-ports https://github.com/SlickAmogus/gbarecomp
 ```
 
-To start from upstream `mstan/gbarecomp` instead, apply the patches (the same
-ones the Duke Nukem Advance recomp uses):
+The fork is required for the multiplayer work below (sub-frame presents, the
+game's ROM-data preparation in single player and netplay, and a test hook in
+the netplay runner are only there). To start from upstream `mstan/gbarecomp`
+for the single-player game, apply the patches (the same ones the Duke Nukem
+Advance recomp uses):
 
 ```
 cd gbarecomp
@@ -125,6 +128,31 @@ the whole "hold Select, press L or R" weapon chord in the right order.
 an entry to select it, left click to choose it, right click to go back. On
 screens without a list (dialogue, title) a left click continues. The pointer
 is hidden while you are in the city.
+
+## Multiplayer (work in progress)
+
+The cartridge still contains the link-cable multiplayer the game was built
+with: Liberty City Survivor, City Circuit, Car Jack Crazy and Special
+Delivery, each with its settings (area, time limit, frag limit / laps / cars /
+packages, AI opponents, weapons) and a "CONNECT CABLE" handshake. None of it
+is reachable in the shipped game. This build puts **MULTI PLAYER** back on the
+title menu (a data-only change to the menu tables, see `src/main.cpp`).
+
+Without a second console the modes run on their own (with AI opponents). The
+build includes the framework's link-cable netplay, where every player runs
+both GBAs and only controller input travels, so two copies can be linked over
+the network by command line:
+
+```
+GTAAdvanceRecomp --netplay-bind 0.0.0.0:5300 --netplay-peer FRIEND_IP:5301 --netplay-seat 0 --netplay-session 4242
+GTAAdvanceRecomp --netplay-bind 0.0.0.0:5301 --netplay-peer YOUR_IP:5300 --netplay-seat 1 --netplay-session 4242
+```
+
+Not finished: both consoles reach the game's CONNECT CABLE screen in step, but
+connecting stops the session ("excessive IRQ depth", the game's serial
+interrupt chain under the virtual cable). An in-game way to host or join
+through the online server comes after that works. `tools/re/link_test.py`
+runs two linked copies on one PC with scripted input.
 
 ## Repository map
 

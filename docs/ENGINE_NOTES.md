@@ -134,6 +134,29 @@ at `+0xC28` / `+0xC24`. Each record is sixteen bytes:
 The model table is at `0x08EBF7F4`, sixteen bytes per model (id, geometry
 pointer, two animation lists).
 
+## Menus and the cut multiplayer
+
+Menu text comes from a string table at `0x08EC4324` (u32 pointers, 618 per
+language; `0x0805E330(id)` looks one up). A menu is a u32 title string id and
+a u32 entry count, then up to seven entries of 0x90 bytes: u32 parent (first
+entry) or index, u32 label string id, u32 submenu, u8 action, u8 number of
+values, then up to sixteen u32 value string ids, and a u32 pointer to the
+setting's byte at the end. Actions seen: 0 open submenu or pick a value, 2
+start the selected multiplayer mode, 3 new game, 4 load, 5 link handshake
+(`0x08065E5C`), 7 mode, 10 credits, 11 erase.
+
+The title opens `0x08332D4C` (NEW GAME, LOAD GAME, ERASE GAME; a hidden fourth
+entry is a developer mission select, PICK LEVEL (CHEAT), `0x08335920`). The
+multiplayer menu `0x08334138` (Liberty City Survivor `0x08334534`, City
+Circuit `0x08334930`, Car Jack Crazy `0x08334D2C`, Special Delivery
+`0x08335128`) still names the old main menu `0x08332554` as its parent but
+nothing leads to it, and each mode menu counts only START GAME although its
+settings entries follow it. The serial code is `0x08065428..0x080666A4`
+(multi-player mode, ten-word packets chained from the serial interrupt
+`0x08066554`); the vertical-blank handler runs `0x080664BC` while the link
+flag (`EWRAM 0x02000D08`) is set, and the player code picks the local player
+through a flag at `+0xC` of `EWRAM 0x02010C60`.
+
 ## Ground
 
 World units to ground texels: multiply by `0x28 / 64 = 0.625`. One tile is 8

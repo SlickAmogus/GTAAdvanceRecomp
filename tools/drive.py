@@ -26,6 +26,13 @@ class Game:
         e = dict(os.environ, GBARECOMP_DIAGNOSTICS="0")
         e.update(env or {})
         self.log = open(ROOT / "build" / "drive.log", "w")
+        # Never the player's own save: every scripted run gets a throwaway
+        # copy (a script that walks into SAVE GAME would overwrite theirs).
+        self.save_file = ROOT / "build" / f"drive_{port}.sav"
+        if "--save" not in extra and "--save-path" not in extra:
+            mine = ROOT.parent / "Grand Theft Auto Advance (USA).sav"
+            self.save_file.write_bytes(mine.read_bytes() if mine.exists() else b"")
+            extra = (*extra, "--save-path", str(self.save_file))
         self.p = subprocess.Popen(
             [str(EXE), "--no-window", "--volume", "0", "--uncapped",
              "--tcp", str(port), *extra],

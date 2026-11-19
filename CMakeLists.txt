@@ -23,6 +23,11 @@ set(GBARECOMP_RUNTIME_UI_ROOT "${_deps}/recomp-ui"
     CACHE PATH "recomp-ui checkout")
 set(RECOMP_UI_ROOT "${GBARECOMP_RUNTIME_UI_ROOT}" CACHE PATH "")
 
+# Link-cable netplay for the game's own multiplayer modes (framework
+# recomp-net adapter). Must be set before the framework is added.
+option(GTA_NETPLAY "Build link-cable netplay for the multiplayer modes" ON)
+set(GBARECOMP_NETPLAY ${GTA_NETPLAY} CACHE BOOL "" FORCE)
+
 # Framework: runtime, hardware model, debug server. Tools/tests stay unbuilt.
 add_subdirectory("${GBARECOMP_ROOT}" gbarecomp EXCLUDE_FROM_ALL)
 include("${CMAKE_CURRENT_BINARY_DIR}/gbarecomp/runtime.cmake")
@@ -39,6 +44,12 @@ target_include_directories(GTAAdvanceRecomp PRIVATE
     "${RECOMP_UI_ROOT}/src" ${SDL2_INCLUDE_DIR})
 # The runtime archives reference each other; GNU ld needs them grouped.
 target_link_gbarecomp_runtime_stack(GTAAdvanceRecomp)
+if(GTA_NETPLAY)
+    target_link_libraries(GTAAdvanceRecomp PRIVATE gbarecomp_netplay)
+    gbarecomp_target_netplay_identity(GTAAdvanceRecomp "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated")
+    target_compile_definitions(GTAAdvanceRecomp PRIVATE GTA_NETPLAY=1)
+endif()
 
 # Dear ImGui core + SDL2 backend + the menu model. recomp-ui is C++17 while
 # the generated cartridge code is C++20, so it gets its own static library.
