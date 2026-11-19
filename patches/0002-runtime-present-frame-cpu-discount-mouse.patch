@@ -1,0 +1,216 @@
+diff --git a/src/armv4t/runtime_arm.h b/src/armv4t/runtime_arm.h
+index a109624..5fe01af 100644
+--- a/src/armv4t/runtime_arm.h
++++ b/src/armv4t/runtime_arm.h
+@@ -489,6 +489,8 @@ extern unsigned long long g_runtime_state_epoch;
+ // at machine reset (runtime_trace_reset). Stamped onto every ring entry so the
+ // recomp and interp oracle can be aligned by identical cycle counts. (MC-HP-002.)
+ extern unsigned long long g_runtime_cycles;
++// See runtime_bus_bridge.cpp: game-owned CPU time discount (0 = exact timing).
++extern unsigned g_runtime_cycle_discount_shift;
+ 
+ // P6 sljit differential gate — shadow-tick mode. While g_runtime_shadow_tick is
+ // nonzero (only during a healed shard's throwaway validation re-run) runtime_tick
+diff --git a/src/runtime/host_window.cpp b/src/runtime/host_window.cpp
+index 335c0a9..e096e05 100644
+--- a/src/runtime/host_window.cpp
++++ b/src/runtime/host_window.cpp
+@@ -363,6 +363,11 @@ struct Backend {
+     std::shared_ptr<const gba::GbaNativeDrawFrame> native_frame;
+ #endif
+     SDL_Texture* resident_frame = nullptr;
++    // Game-supplied replacement frame (set_external_frame), one present only.
++    const std::uint32_t* ext_pixels = nullptr;
++    unsigned ext_w = 0, ext_h = 0;
++    SDL_Texture* ext_texture = nullptr;
++    int ext_tex_w = 0, ext_tex_h = 0;
+     Uint32        texture_format = SDL_PIXELFORMAT_RGB24;
+     std::vector<uint32_t> packed_upload;
+     unsigned      presentation_source_w = 0, presentation_source_h = 0;
+@@ -2563,6 +2568,7 @@ void HostWindow::close() {
+ #endif
+     destroy_sharp_texture(b);
+     b->hd_gpu.reset();
++    if (b->ext_texture) SDL_DestroyTexture(b->ext_texture);
+     if (b->texture)   SDL_DestroyTexture(b->texture);
+     if (b->renderer)  SDL_DestroyRenderer(b->renderer);
+     if (b->window)    SDL_DestroyWindow(b->window);
+@@ -2720,6 +2726,42 @@ bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFr
+ 
+ void HostWindow::present(const uint8_t* rgb888) { present(rgb888, 0, 0); }
+ 
++void HostWindow::set_external_frame(const std::uint32_t* argb, unsigned width, unsigned height) {
++    if (!open_ || !impl_) return;
++    auto* b = static_cast<Backend*>(impl_);
++    b->ext_pixels = argb; b->ext_w = width; b->ext_h = height;
++}
++
++// Draws the pending game-supplied frame across the whole drawable. Returns
++// false (leaving the normal guest frame to be drawn) if there is none or the
++// backend cannot take it.
++static bool present_external_frame(Backend* b) {
++    const std::uint32_t* pixels = b->ext_pixels;
++    b->ext_pixels = nullptr;
++    if (!pixels || !b->ext_w || !b->ext_h) return false;
++    if (!b->ext_texture || b->ext_tex_w != int(b->ext_w) || b->ext_tex_h != int(b->ext_h)) {
++        if (b->ext_texture) SDL_DestroyTexture(b->ext_texture);
++        b->ext_texture = SDL_CreateTexture(b->renderer, SDL_PIXELFORMAT_ARGB8888,
++            SDL_TEXTUREACCESS_STREAMING, int(b->ext_w), int(b->ext_h));
++        if (!b->ext_texture) { b->ext_tex_w = b->ext_tex_h = 0; return false; }
++        SDL_SetTextureBlendMode(b->ext_texture, SDL_BLENDMODE_NONE);
++        b->ext_tex_w = int(b->ext_w); b->ext_tex_h = int(b->ext_h);
++        std::fprintf(stderr, "host_window: external frame %ux%u\n", b->ext_w, b->ext_h);
++    }
++#if SDL_VERSION_ATLEAST(2, 0, 12)
++    SDL_SetTextureScaleMode(b->ext_texture,
++        b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
++#endif
++    if (SDL_UpdateTexture(b->ext_texture, nullptr, pixels, int(b->ext_w) * 4) != 0) return false;
++    int logical_w = 0, logical_h = 0;
++    SDL_RenderGetLogicalSize(b->renderer, &logical_w, &logical_h);
++    SDL_RenderSetLogicalSize(b->renderer, 0, 0);
++    SDL_RenderSetViewport(b->renderer, nullptr);
++    const bool ok = SDL_RenderCopy(b->renderer, b->ext_texture, nullptr, nullptr) == 0;
++    SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
++    return ok;
++}
++
+ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sampled_h) {
+     if (!open_ || !impl_) return;
+     auto* b = static_cast<Backend*>(impl_);
+@@ -2878,6 +2920,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
+         std::fflush(stderr);
+     }
+     if (touch_input_enabled(b)) publish_touch_presentation(b);
++    if (!present_external_frame(b)) {
+ #if defined(__ANDROID__)
+     const SDL_Rect destination{layout.x, layout.y, layout.width, layout.height};
+     SDL_RenderCopy(b->renderer, frame_texture, nullptr, &destination);
+@@ -2937,6 +2980,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
+         SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_NONE);
+         SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
+     }
++    }  // !present_external_frame
+     render_host_layers(b);
+     // MC-WS-002: time the present itself (vsync blocks here — or doesn't)
+     // and stamp the DWM refresh counter into the cadence ring.
+@@ -3463,7 +3507,14 @@ HostWindow::Events HostWindow::pump() {
+             continue;
+         }
+         if (mouse_event && suppress_opening_touch) continue;
+-        if (b->runtime_imgui_ready) {
++        // While the game has the mouse in relative mode (mouse aim), the UI
++        // must not see mouse events: its SDL backend would treat holding a
++        // button while moving as a drag and take, then release, the system
++        // mouse capture, which knocks the window out of relative mode.
++        // (Releases still pass, so a press from before the capture cannot stick.)
++        const bool game_owns_mouse = mouse_event && e.type != SDL_MOUSEBUTTONUP &&
++            SDL_GetRelativeMouseMode() == SDL_TRUE;
++        if (b->runtime_imgui_ready && !game_owns_mouse) {
+             ImGui::SetCurrentContext(b->runtime_imgui_context);
+             ImGui_ImplSDL2_ProcessEvent(&e);
+         }
+@@ -3893,6 +3944,7 @@ void HostWindow::set_touch_pad_visible(bool /*visible*/) {}
+ void HostWindow::set_view_margins(std::uint32_t, std::uint32_t, std::uint32_t,
+                                   std::uint32_t) {}
+ void HostWindow::set_host_overlay(void (*)(HostOverlay*)) {}
++void HostWindow::set_external_frame(const std::uint32_t*, unsigned, unsigned) {}
+ float HostWindow::px_per_mm() const { return 96.0f / 25.4f; }
+ void HostWindow::set_presentation_anchor_top(bool) {}
+ bool HostWindow::wait_for_foreground() { return false; }
+diff --git a/src/runtime/host_window.h b/src/runtime/host_window.h
+index 20f1ad1..f182c34 100644
+--- a/src/runtime/host_window.h
++++ b/src/runtime/host_window.h
+@@ -140,6 +140,10 @@ public:
+                           std::uint32_t top, std::uint32_t bottom);
+     // Game-owned host overlay, drawn each present (null = none).
+     void set_host_overlay(void (*overlay)(HostOverlay*));
++    // Game-supplied replacement image for the next present(): drawn across the
++    // whole drawable instead of the guest frame. Pixels are 0xAARRGGBB,
++    // row-major, and must stay valid until that present() returns.
++    void set_external_frame(const std::uint32_t* argb, unsigned width, unsigned height);
+     // Physical density of the window's display (drawable px per mm).
+     float px_per_mm() const;
+     // Portrait presentations may anchor the image to the top edge so host
+diff --git a/src/runtime/runtime.cpp b/src/runtime/runtime.cpp
+index 5c7c105..b91286f 100644
+--- a/src/runtime/runtime.cpp
++++ b/src/runtime/runtime.cpp
+@@ -3176,7 +3176,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+             const auto* hd = ppu.high_resolution();
+             win.present(pixels, hd->width(), hd->height());
+             ++high_resolution_presented;
+-        } else win.present(live_fb.data());
++        } else {
++            if (opts.present_frame) {
++                RunOptions::PresentFrame frame;
++                frame.guest_rgb = live_fb.data();
++                frame.guest_width = ppu.render_width();
++                frame.guest_height = ppu.render_height();
++                if (win.drawable_size(&frame.drawable_width, &frame.drawable_height) &&
++                    opts.present_frame(&frame) && frame.argb)
++                    win.set_external_frame(frame.argb, frame.width, frame.height);
++            }
++            win.present(live_fb.data());
++        }
+ #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+         if (current_hd && current_hd->deferred_rendering() && !win.hd_jobs_available())
+             ppu.set_deferred_hd_rendering(false);
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 8c61adb..be0da46 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -221,6 +221,22 @@ struct RunOptions {
+     // present after the game image, before the settings menu; guest thread.
+     void (*host_overlay)(HostOverlay* overlay) = nullptr;
+ 
++    // Optional game-owned replacement for the presented image. Called on the
++    // guest thread for every present of a live frame, with the guest frame
++    // (RGB888, guest_width x guest_height) and the window's drawable size.
++    // Returning non-zero with `argb` set presents that image (0xAARRGGBB,
++    // row-major, width x height) across the whole drawable instead; it must
++    // stay valid until the next call. Returning zero presents the guest frame
++    // as usual. Never called for headless runs.
++    struct PresentFrame {
++        const std::uint8_t* guest_rgb = nullptr;
++        unsigned guest_width = 0, guest_height = 0;
++        int drawable_width = 0, drawable_height = 0;
++        const std::uint32_t* argb = nullptr;    // out
++        unsigned width = 0, height = 0;         // out
++    };
++    int (*present_frame)(PresentFrame* frame) = nullptr;
++
+     // Optional game-owned debug TCP commands (JSON line in, JSON line out).
+     // Return non-zero when the request was handled and `reply` was written
+     // through `write` (may be called repeatedly to stream a large reply).
+diff --git a/src/runtime/runtime_bus_bridge.cpp b/src/runtime/runtime_bus_bridge.cpp
+index fa45091..1a925f2 100644
+--- a/src/runtime/runtime_bus_bridge.cpp
++++ b/src/runtime/runtime_bus_bridge.cpp
+@@ -143,6 +143,12 @@ extern "C" uint32_t g_irq_nest_depth;
+ // fixed-quantum clock.) runtime_trace_event stamps this onto every ring entry
+ // so the recomp and the bios_smoke interp oracle align by identical cycles.
+ extern "C" unsigned long long g_runtime_cycles = 0;
++// Game-owned CPU time discount: while non-zero, guest instructions are charged
++// 1/2^N of their cycles (the remainder carries over, so no time is lost to
++// rounding). Device time is unaffected. A trusted game hook uses this around
++// guest work whose output it replaces natively. 0 = exact timing.
++extern "C" unsigned g_runtime_cycle_discount_shift = 0;
++static uint32_t g_cycle_discount_carry = 0;
+ 
+ // ── Stage 2 idle-loop elision: disturbance epoch + skip counters ─────────────
+ // Bumped whenever something happens that could change a watched poll value or
+@@ -810,6 +816,12 @@ extern "C" void runtime_tick(uint32_t cycles) {
+     // cycle cost (for the cycle diff); the interpreter pass already pumped the
+     // devices / delivered IRQs for this window, so do nothing else here.
+     if (g_runtime_shadow_tick) { g_runtime_shadow_cycles += cycles; return; }
++    if (g_runtime_cycle_discount_shift) {
++        const unsigned shift = g_runtime_cycle_discount_shift > 8u ? 8u : g_runtime_cycle_discount_shift;
++        g_cycle_discount_carry += cycles;
++        cycles = g_cycle_discount_carry >> shift;
++        g_cycle_discount_carry &= (1u << shift) - 1u;
++    }
+ 
+     auto* bus = gbarecomp::g_active_bus;
+     auto* ppu = gbarecomp::g_active_ppu;

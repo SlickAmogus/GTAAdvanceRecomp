@@ -1,0 +1,216 @@
+# gba_recompile base config for Grand Theft Auto Advance (BGTE, USA).
+# Schema: ../../DukeAdvance/gbarecomp/docs/TOML_SCHEMA.md. Machine-found seeds
+# live in the overlay recomp_scan.toml (tools/scan_seeds.py).
+
+[program]
+name         = "Grand Theft Auto Advance"
+id           = "gtaadvance"
+load_address = 0x08000000
+size         = 0x01000000
+entry_pc     = 0x08000000
+# Executable part of the cartridge: crt0 through the last libc routine.
+# Thumb 0x08000220-0x08067000, ARM 0x08067000-0x0806B500, Thumb to 0x08071C00;
+# everything after is data.
+aot_scan_start = 0x080000C0
+aot_scan_end   = 0x08071C00
+
+[identity]
+sha1 = "742fc0062ad930253ffea449953061381577649e"
+
+[[extra_func]]
+addr = 0x080000C0
+mode = "arm"
+name = "crt0_start"
+note = "target of the header branch at 0x08000000"
+
+[[extra_func]]
+addr = 0x08000104
+mode = "arm"
+name = "irq_dispatch"
+note = "crt0 stores this address at 0x03007FFC; handler table at 0x02000170"
+
+[[extra_func]]
+addr = 0x08000430
+mode = "thumb"
+name = "main"
+note = "crt0 literal at 0x08000100"
+
+# ---- routines the game copies into IWRAM --------------------------------
+# The loader at 0x08011C00.. walks the table at 0x08CA4164 ({EWRAM pointer
+# variable, ROM start, ROM end} x 12) and copies each ARM routine into IWRAM,
+# storing where it landed. The two sound mixer routines (ROM 0x0806B090 and
+# 0x0806B298, literal pool at 0x08033248) are copied the same way. Addresses
+# below were observed in gameplay (renderer + mixer) and on the title screen
+# (mixer only, which then lands lower).
+
+[[code_copy]]
+runtime_start = 0x03000100
+source_start  = 0x08067A54
+size          = 0x5D4
+name          = "render_a"
+
+[[extra_func]]
+addr = 0x03000100
+mode = "arm"
+name = "iwram_render_a_0"
+
+[[code_copy]]
+runtime_start = 0x030006D4
+source_start  = 0x08069404
+size          = 0xE0C
+name          = "render_b"
+
+[[extra_func]]
+addr = 0x030006D4
+mode = "arm"
+name = "iwram_render_b_0"
+
+[[code_copy]]
+runtime_start = 0x030014E0
+source_start  = 0x0806AE80
+size          = 0x118
+name          = "render_c"
+
+[[extra_func]]
+addr = 0x030014E0
+mode = "arm"
+name = "iwram_render_c_0"
+
+[[code_copy]]
+runtime_start = 0x030015F8
+source_start  = 0x0806AF98
+size          = 0xF0
+name          = "render_d"
+
+[[extra_func]]
+addr = 0x030015F8
+mode = "arm"
+name = "iwram_render_d_0"
+
+[[code_copy]]
+runtime_start = 0x030016E8
+source_start  = 0x0806A210
+size          = 0xC70
+name          = "render_spans"
+
+[[extra_func]]
+addr = 0x030016E8
+mode = "arm"
+name = "iwram_render_spans_0"
+
+[[extra_func]]
+addr = 0x030017C0
+mode = "arm"
+name = "iwram_render_spans_D8"
+
+[[extra_func]]
+addr = 0x030018A4
+mode = "arm"
+name = "iwram_render_spans_1BC"
+
+[[extra_func]]
+addr = 0x03001968
+mode = "arm"
+name = "iwram_render_spans_280"
+
+[[extra_func]]
+addr = 0x03001A58
+mode = "arm"
+name = "iwram_render_spans_370"
+
+[[extra_func]]
+addr = 0x03001B3C
+mode = "arm"
+name = "iwram_render_spans_454"
+
+[[extra_func]]
+addr = 0x03001C5C
+mode = "arm"
+name = "iwram_render_spans_574"
+
+[[code_copy]]
+runtime_start = 0x03002358
+source_start  = 0x08068028
+size          = 0x13DC
+name          = "render_e"
+
+[[extra_func]]
+addr = 0x03002358
+mode = "arm"
+name = "iwram_render_e_0"
+
+[[code_copy]]
+runtime_start = 0x03005120
+source_start  = 0x0806B298
+size          = 0x204
+name          = "mixer_a"
+
+[[extra_func]]
+addr = 0x03005120
+mode = "arm"
+name = "iwram_mixer_a_0"
+
+[[code_copy]]
+runtime_start = 0x03005324
+source_start  = 0x0806B090
+size          = 0x200
+name          = "mixer_b"
+
+[[extra_func]]
+addr = 0x03005324
+mode = "arm"
+name = "iwram_mixer_b_0"
+
+[[code_copy]]
+runtime_start = 0x03000320
+source_start  = 0x0806B298
+size          = 0x204
+name          = "mixer_a_title"
+
+[[extra_func]]
+addr = 0x03000320
+mode = "arm"
+name = "iwram_mixer_a_title_0"
+
+[[code_copy]]
+runtime_start = 0x03000524
+source_start  = 0x0806B090
+size          = 0x200
+name          = "mixer_b_title"
+
+[[extra_func]]
+addr = 0x03000524
+mode = "arm"
+name = "iwram_mixer_b_title_0"
+
+# Entry points seen at run time that nothing references statically.
+[[extra_func]]
+addr = 0x030006DC
+mode = "arm"
+name = "iwram_render_b_body"
+note = "render_b starts with a branch over one data word"
+
+[[extra_func]]
+addr = 0x03001EC8
+mode = "arm"
+note = "span routine: aligned entry after two no-ops"
+
+[[extra_func]]
+addr = 0x030021A4
+mode = "arm"
+note = "span routine: aligned entry after two no-ops"
+
+[[extra_func]]
+addr = 0x0805B520
+mode = "thumb"
+note = "stackless function reached through a pointer"
+
+[[extra_func]]
+addr = 0x0805B544
+mode = "thumb"
+note = "stackless function reached through a pointer"
+
+[[extra_func]]
+addr = 0x0805D060
+mode = "thumb"
+note = "stackless function reached through a pointer"

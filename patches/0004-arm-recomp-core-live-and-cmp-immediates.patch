@@ -1,0 +1,31 @@
+diff --git a/profiles/armv4t_gba/arm_codegen.h b/profiles/armv4t_gba/arm_codegen.h
+index f3564c1..47bfe37 100644
+--- a/profiles/armv4t_gba/arm_codegen.h
++++ b/profiles/armv4t_gba/arm_codegen.h
+@@ -64,7 +64,7 @@ struct CodegenCtx {
+     std::string runtime_pc_base;
+ 
+     // A guarded native template may treat the imm12 field of an AL, non-S
+-    // MOV/ADD (no PC operands/destination) as live data. The operation and
++    // MOV/ADD/AND, or of an AL CMP (no PC operands/destination), as live data. The operation and
+     // registers remain fixed and validated; no instruction is decoded at run
+     // time. Requires runtime_pc_base and supports_runtime_arm_immediate().
+     bool runtime_arm_immediate = false;
+@@ -112,9 +112,14 @@ class ArmCodegen {
+ public:
+     static bool supports_native_region(const Instr&);
+     static bool supports_runtime_arm_immediate(const Instr& i) {
+-        return !i.thumb && !i.is_undefined && i.cond == Cond::AL &&
+-            !i.set_flags && i.rd < 15 && i.op2.kind == Op2::Kind::Imm &&
+-            (i.op == IrOp::MOV || (i.op == IrOp::ADD && i.rn < 15));
++        if (i.thumb || i.is_undefined || i.cond != Cond::AL ||
++            i.op2.kind != Op2::Kind::Imm) return false;
++        // CMP only produces arithmetic flags, so its operand may be live too
++        // (the shifter carry of a rotated immediate is not involved).
++        if (i.op == IrOp::CMP) return i.rn < 15;
++        return !i.set_flags && i.rd < 15 &&
++            (i.op == IrOp::MOV ||
++             ((i.op == IrOp::ADD || i.op == IrOp::AND) && i.rn < 15));
+     }
+ 
+     // Emit C source for one decoded instruction. `not_implemented`
