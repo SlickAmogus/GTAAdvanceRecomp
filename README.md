@@ -2,8 +2,9 @@
 
 A native PC build of **Grand Theft Auto Advance** (GBA, USA, `BGTE`) made by
 statically recompiling the cartridge with
-[GBARecomp](https://github.com/mstan/gbarecomp), plus a PC keyboard/mouse
-layout and an in-game options menu.
+[GBARecomp](https://github.com/mstan/gbarecomp), plus a native renderer that
+draws the city at the window's own resolution and shape (16:9, 21:9, ...), a PC
+keyboard/mouse layout and an in-game options menu.
 
 No game data is in this folder. You need your own cartridge dump and your own
 GBA BIOS dump.
@@ -55,7 +56,24 @@ keep it to your own machines.
 ## Playing
 
 **Esc** opens the options menu: display mode, window scale, filters, volume,
-save states, resolution scale (sharpens the ground layer), and Controls.
+save states, Graphics and Controls.
+
+### Native renderer
+
+On by default (Esc > Graphics > Native renderer). The ground and the buildings
+are drawn on the PC straight from the game's world data:
+
+- at the window's resolution, with clean building edges and perspective;
+- at the window's aspect ratio: a 16:9 or 21:9 window sees more of the streets
+  to the sides instead of bars, and the game is told about the extra width so
+  people and traffic exist there too. The radar keeps to the left edge, the
+  status block and district name to the right;
+- **Render resolution** trades sharpness for speed or a chunkier look.
+
+People, cars and the HUD are the game's own sprites, scaled up. The game still
+draws its own picture underneath; it is simply not shown. Turning the option
+off shows the untouched 240x160 picture. Menus and cutscenes are always the
+original picture.
 
 | Key | On foot | Driving |
 |---|---|---|
@@ -78,10 +96,13 @@ The original bindings (arrows, X = A, Z = B, ...) keep working.
 |---|---|
 | `src/main.cpp` | Host entry point |
 | `src/pc_controls.cpp` | Keyboard/mouse layout, its menu rows and settings |
+| `src/scene/` | Native renderer (ground and buildings from the game's world data) |
+| `src/scene_host.cpp` | Composites the native scene with the game's sprites and HUD; widescreen hooks |
+| `docs/ENGINE_NOTES.md` | What is known about the game's engine and data formats |
 | `recomp.toml` | Hand-written recompiler config (entry points, RAM-copied routines) |
 | `tools/scan_seeds.py` | Finds pointer-table functions and computed-jump landings |
 | `tools/drive.py` | Headless, muted test driver over the debug server |
-| `tools/re/` | Reverse-engineering tooling (Ghidra seeds and decompile script) |
+| `tools/re/` | Reverse-engineering and comparison tools (Ghidra scripts, native-vs-game shots) |
 | `patches/` | Fixes to apply to the gbarecomp checkout |
 
 ## Licensing

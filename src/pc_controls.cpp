@@ -10,6 +10,7 @@
 //
 // Everything here only presses pad buttons; no guest memory is written.
 #include "pc_controls.h"
+#include "scene_host.h"
 
 #include <SDL.h>
 
@@ -28,6 +29,8 @@ namespace {
 constexpr char kKeyLayout[] = "gta.pc_layout";
 constexpr char kKeyMouse[]  = "gta.mouse_buttons";
 constexpr char kKeyFilter[] = "gta.filter";
+constexpr char kKeyNative[] = "gta.native_renderer";
+constexpr char kKeyResolution[] = "gta.resolution";
 
 struct Settings {
     int layout = 1;         // WASD layout on
@@ -56,6 +59,8 @@ void load_settings(const char* argv0) {
         else if (!std::strcmp(key, "mouse_buttons")) g_settings.mouse = value != 0;
         else if (!std::strcmp(key, "fullscreen")) g_settings.fullscreen = clamp(value, 0, 2);
         else if (!std::strcmp(key, "filter")) g_settings.filter = clamp(value, 0, 2);
+        else if (!std::strcmp(key, "native_renderer")) gta_scene_settings()->native = value != 0;
+        else if (!std::strcmp(key, "resolution")) gta_scene_settings()->resolution = clamp(value, 0, 4);
     }
     std::fclose(f);
 }
@@ -144,7 +149,18 @@ std::uint16_t input_frame(const gbarecomp::TouchFrameInfo*) {
 // ── settings-menu rows ──────────────────────────────────────────────────────
 const char* const kFilterChoices[] = {"Sharp pixels", "Smooth", "Sharp-bilinear"};
 
+const char* const kResolutionChoices[] = {"Window (sharpest)", "75%", "50%", "33%", "25% (chunky)"};
+
 const RecompRuntimeUiItem kItems[] = {
+    {kKeyNative, "Graphics", "Native renderer",
+     "Draw the city on the PC at the window's own resolution and shape (16:9, 21:9, "
+     "anything): wider windows see more of the streets. Turn off for the untouched "
+     "240x160 picture.",
+     RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
+    {kKeyResolution, "Graphics", "Render resolution",
+     "Resolution of the native city view relative to the window. Lower values are "
+     "faster and give a chunkier, more retro look.",
+     RECOMP_RUNTIME_UI_CHOICE, 0, 4, 1, kResolutionChoices, 5, nullptr},
     {kKeyLayout, "Controls", "WASD layout",
      "W/A/S/D move and steer. Left Ctrl or J: attack / accelerate. Left Shift or K: "
      "sprint / reverse. Space: strafe / handbrake. F: enter or exit a car. C: jump / "
@@ -165,6 +181,8 @@ int ui_get(const char* key, int* out) {
     if (!std::strcmp(key, kKeyLayout)) *out = g_settings.layout;
     else if (!std::strcmp(key, kKeyMouse)) *out = g_settings.mouse;
     else if (!std::strcmp(key, kKeyFilter)) *out = g_settings.filter;
+    else if (!std::strcmp(key, kKeyNative)) *out = gta_scene_settings()->native;
+    else if (!std::strcmp(key, kKeyResolution)) *out = gta_scene_settings()->resolution;
     else return 0;
     return 1;
 }
@@ -173,6 +191,8 @@ int ui_set(const char* key, int value) {
     if (!std::strcmp(key, kKeyLayout)) g_settings.layout = value != 0;
     else if (!std::strcmp(key, kKeyMouse)) g_settings.mouse = value != 0;
     else if (!std::strcmp(key, kKeyFilter)) g_settings.filter = clamp(value, 0, 2);
+    else if (!std::strcmp(key, kKeyNative)) gta_scene_settings()->native = value != 0;
+    else if (!std::strcmp(key, kKeyResolution)) gta_scene_settings()->resolution = clamp(value, 0, 4);
     else return 0;
     save_settings();
     return 1;

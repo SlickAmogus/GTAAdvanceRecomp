@@ -214,3 +214,36 @@ note = "stackless function reached through a pointer"
 addr = 0x0805D060
 mode = "thumb"
 note = "stackless function reached through a pointer"
+
+# Widescreen (src/scene_host.cpp). The camera code derives the visible
+# rectangle from the camera height; its left and right edges (IWRAM
+# 0x03000050 / 0x03000058) decide which people and cars get a sprite, and
+# sprite screen columns are measured from the left edge. It is computed in
+# two places: 0x0800A130, called by the per-frame camera routines at
+# 0x08009058 and 0x080098DA, and 0x08008BC4 when the camera is placed
+# directly. The function called immediately after each of those is hooked,
+# observed only: 0x08009832 and 0x0800A0C0 (the calls that follow 0x0800A130)
+# and 0x08010110 (the last call of 0x08008BC4). While the native renderer
+# shows a picture wider than 3:2 the hook widens the rectangle. The hooked
+# functions always run unchanged.
+[[mod_function_hook]]
+addr = 0x08009832
+mode = "thumb"
+note = "runs right after the visible rectangle is computed: widened for widescreen (observed only)"
+
+[[mod_function_hook]]
+addr = 0x0800A0C0
+mode = "thumb"
+note = "same, second camera routine (observed only)"
+
+[[mod_function_hook]]
+addr = 0x08010110
+mode = "thumb"
+note = "same, after a direct camera placement (observed only)"
+
+# 0x08014650 is "cmp r0, #0xF0" in 0x08014500: a sprite whose left edge is
+# beyond column 240 is released. With the rectangle widened, columns run past
+# 240, so the limit takes the widened width. Unchanged while the hook is off.
+[[thumb_alu_immediate_override]]
+addr = 0x08014650
+note = "sprite right-edge limit follows the widened picture"

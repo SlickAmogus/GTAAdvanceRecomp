@@ -4,6 +4,7 @@
 // (window, audio, input, saves, PPU) comes from the shared gbarecomp runtime.
 #include "runtime.h"
 #include "pc_controls.h"
+#include "scene_host.h"
 
 #include <cstring>
 #include <string>
@@ -38,6 +39,8 @@ int main(int argc, char** argv) {
     opts.freely_resizable_window = true;
     opts.show_fps_by_default = true;
     opts.high_resolution_affine_provider = ground_layer_is_affine;
+    opts.tcp_command = gta_debug_tcp_command;
+    gta_scene_install(&opts);
     gta_pc_controls_install(&opts, argv[0]);
 
     std::vector<std::string> remembered;
