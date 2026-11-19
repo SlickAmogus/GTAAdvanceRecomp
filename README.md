@@ -34,7 +34,12 @@ same ones the Duke Nukem Advance recomp uses):
 cd gbarecomp
 git apply ../GTAAdvanceRecomp/patches/0001-*.patch ../GTAAdvanceRecomp/patches/0002-*.patch ../GTAAdvanceRecomp/patches/0003-*.patch
 git -C external/arm-recomp-core apply ../../../GTAAdvanceRecomp/patches/0004-*.patch
+git apply ../GTAAdvanceRecomp/patches/0005-*.patch
 ```
+
+`0005` makes exclusive fullscreen use the desktop's own resolution (instead of
+switching the monitor to a tiny mode) and fixes switching between borderless
+and exclusive from the menu.
 
 ## Build (Windows)
 
@@ -55,8 +60,12 @@ keep it to your own machines.
 
 ## Playing
 
-**Esc** opens the options menu: display mode, window scale, filters, volume,
-save states, Graphics and Controls.
+The game starts in borderless fullscreen; **Esc** opens the options menu
+(display mode, window scale, filters, volume, save states, Graphics and
+Controls) and Alt+Enter toggles fullscreen. The display mode is remembered.
+The shell's turbo hotkey is unbound and its performance overlay is on F3,
+because their defaults (Tab, F) are used by the layout below; rebind them in
+`config.ini` under `[KeyMap]`.
 
 ### Native renderer
 

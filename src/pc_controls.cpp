@@ -35,13 +35,15 @@ constexpr char kKeyResolution[] = "gta.resolution";
 struct Settings {
     int layout = 1;         // WASD layout on
     int mouse = 1;          // mouse buttons attack / sprint
-    int fullscreen = 0;     // 0 windowed, 1 borderless, 2 exclusive (remembered)
+    int fullscreen = 1;     // 0 windowed, 1 borderless, 2 exclusive (remembered)
     int filter = 0;         // 0 sharp pixels, 1 smooth, 2 sharp-bilinear
 } g_settings;
 
 std::string g_settings_path;
 
 int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+void ensure_hotkeys(const std::filesystem::path& dir);
 
 void load_settings(const char* argv0) {
     // Beside the executable. (No SDL here: this runs before SDL_Init, and a
@@ -50,6 +52,7 @@ void load_settings(const char* argv0) {
     std::filesystem::path dir = std::filesystem::absolute(
         std::filesystem::path(argv0 ? argv0 : "."), ec).parent_path();
     g_settings_path = (dir / "gta_pc.ini").string();
+    ensure_hotkeys(dir);
     std::FILE* f = std::fopen(g_settings_path.c_str(), "r");
     if (!f) return;
     char key[64];
@@ -63,6 +66,31 @@ void load_settings(const char* argv0) {
         else if (!std::strcmp(key, "resolution")) gta_scene_settings()->resolution = clamp(value, 0, 4);
     }
     std::fclose(f);
+}
+
+// The runtime's own hotkeys (config.ini [KeyMap]) default to Tab = turbo and
+// F = performance overlay, both of which this layout uses for the game. Give
+// them other defaults unless the player has already chosen bindings.
+void ensure_hotkeys(const std::filesystem::path& dir) {
+    const std::filesystem::path path = dir / "config.ini";
+    std::string text;
+    if (std::FILE* f = std::fopen(path.string().c_str(), "rb")) {
+        char buf[4096];
+        for (std::size_t n; (n = std::fread(buf, 1, sizeof(buf), f)) > 0;) text.append(buf, n);
+        std::fclose(f);
+    }
+    if (text.find("[KeyMap]") != std::string::npos) return;
+    if (!text.empty() && text.back() != '\n') text += '\n';
+    text += "\n[KeyMap]\n"
+            "# Hotkeys of the PC shell. Empty = unbound.\n"
+            "Fullscreen=Alt+Return\n"
+            "Pause=Shift+P\n"
+            "Turbo=\n"
+            "DisplayPerf=F3\n";
+    if (std::FILE* f = std::fopen(path.string().c_str(), "wb")) {
+        std::fwrite(text.data(), 1, text.size(), f);
+        std::fclose(f);
+    }
 }
 
 void save_settings() {

@@ -1,0 +1,31 @@
+From: GTAAdvanceRecomp
+Subject: [PATCH 5] host window: exclusive fullscreen at the desktop mode; clean switch between fullscreen kinds
+
+Exclusive fullscreen let SDL pick the display mode closest to the window's
+size, which switched the monitor to a tiny resolution. Switching between
+exclusive and borderless directly left the window at its old size in a
+corner. Apply after 0002 (line numbers assume it).
+---
+diff --git a/src/runtime/host_window.cpp b/src/runtime/host_window.cpp
+index 335c0a9..7303dce 100644
+--- a/src/runtime/host_window.cpp
++++ b/src/runtime/host_window.cpp
+@@ -3065,6 +3109,18 @@ void HostWindow::set_fullscreen(int mode) {
+     Uint32 flag = mode == 2 ? SDL_WINDOW_FULLSCREEN
+                 : mode == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP
+                             : 0;
++    // Exclusive fullscreen keeps the desktop's own resolution and refresh
++    // rate. Left to itself SDL picks the display mode closest to the window's
++    // size (a few hundred pixels), which switches the monitor to a tiny mode.
++    if (mode == 2) {
++        SDL_DisplayMode desktop;
++        const int display = SDL_GetWindowDisplayIndex(b->window);
++        if (display >= 0 && SDL_GetDesktopDisplayMode(display, &desktop) == 0)
++            SDL_SetWindowDisplayMode(b->window, &desktop);
++    }
++    // Going straight from one fullscreen kind to the other leaves the window
++    // at its old size in a corner of the screen; pass through windowed.
++    if (b->fullscreen != 0 && mode != 0) SDL_SetWindowFullscreen(b->window, 0);
+     if (SDL_SetWindowFullscreen(b->window, flag) == 0) {
+         b->fullscreen = mode;
+         // Record which panel/mode the cadence data now runs on.
