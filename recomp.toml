@@ -247,3 +247,36 @@ note = "same, after a direct camera placement (observed only)"
 [[thumb_alu_immediate_override]]
 addr = 0x08014650
 note = "sprite right-edge limit follows the widened picture"
+
+# Native renderer (src/scene_host.cpp). 0x0800D2B0 draws the building layer.
+# 0x0800E3E4 is the call right after it sorts the instance list: observed
+# only, the renderer copies the list there while it is whole. 0x0800FDEC
+# (transform one instance's faces into a display list) and 0x0800DB64
+# (rasterise that list) only produce pixels of the building layer; while the
+# native renderer is on they are skipped, which is what lets the game finish
+# a frame every display refresh. With the hook off or declining they run
+# unchanged.
+[[mod_function_hook]]
+addr = 0x0800E3E4
+mode = "thumb"
+note = "after the instance list is sorted: list copied for the native renderer (observed only)"
+
+[[mod_function_hook]]
+addr = 0x0800FDEC
+mode = "thumb"
+note = "per-instance face transform: skipped under the native renderer"
+
+[[mod_function_hook]]
+addr = 0x0800DB64
+mode = "thumb"
+note = "per-instance display list rasteriser: skipped under the native renderer"
+
+# Smooth motion (src/scene_host.cpp). 0x080127EC copies a finished world
+# tick's sprite list to hardware OAM; the vertical-blank handler calls it
+# first when it flips the picture. Observed only: the renderer latches the
+# camera that belongs to those sprites there, so it can show states between
+# two ticks. The function always runs.
+[[mod_function_hook]]
+addr = 0x080127EC
+mode = "thumb"
+note = "picture flip: camera latched with the tick's sprites (observed only)"

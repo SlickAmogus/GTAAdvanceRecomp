@@ -89,7 +89,146 @@ const int g_registered =
     gba_mod_register_function_entry_plugin(kHookId, kAfterRectFns[1], 1, widen_hook) &&
     gba_mod_register_function_entry_plugin(kHookId, kAfterRectFns[2], 1, widen_hook);
 
+// ---- the game's own building pass ---------------------------------------------
+// 0x0800D2B0 draws the building layer: it sorts the instance list, then for
+// each visible instance transforms its faces (0x0800FDEC) and rasterises the
+// resulting display list (0x0800DB64). On the console that is most of a
+// frame's CPU time.
+//
+// While the native renderer is on:
+//  - 0x0800E3E4, called right after the sort, is observed to copy the list
+//    while it is whole. Presenting reads this copy: the live list is relinked
+//    across several display frames and is often incomplete in between.
+//  - the two drawing functions are skipped: their pixels are never shown.
+constexpr char kSceneHookId[] = "gta.scene";
+constexpr std::uint32_t kAfterSortFn = 0x0800E3E4u, kFaceListFn = 0x0800FDECu, kDrawListFn = 0x0800DB64u;
+constexpr int kMaxInstances = 512;
+gtascene::Instance g_instances[kMaxInstances];
+int g_instance_count = -1;          // -1 = no copy yet
+unsigned g_instance_age = 0;        // display frames since the copy was taken
+
+bool city_view(gba::GbaBus* bus) {
+    const std::uint16_t dispcnt = bus->io().read16(0x000);
+    return (dispcnt & 7u) == 1u && (dispcnt & 0x0500) == 0x0500;
+}
+
+gtascene::Memory scene_memory(gba::GbaBus* bus) {
+    gtascene::Memory mem;
+    mem.ewram = bus->ewram_ptr(); mem.iwram = bus->iwram_ptr();
+    mem.rom = bus->rom_ptr(); mem.rom_size = bus->rom_size();
+    mem.palette = bus->pal_ptr();
+    return mem;
+}
+
+int after_sort_hook(std::uint32_t, int, ArmCpuState*) {
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus) return 0;
+    const int n = gtascene::read_instances(scene_memory(bus), g_instances, kMaxInstances);
+    if (n >= 0) { g_instance_count = n; g_instance_age = 0; }
+    return 0;   // observed only
+}
+
+// Makes a hooked function return to its caller without running its body.
+// A direct generated call has pushed its return address on the runtime's
+// call-return stack; it is popped here exactly as the function's own return
+// would have done (otherwise every skipped call leaks an entry).
+int skip_function(ArmCpuState* cpu) {
+    const std::uint32_t ret = cpu->R[14] & ~1u;
+    runtime_call_should_return(ret);
+    cpu->R[15] = ret;
+    return 1;
+}
+
+int skip_drawing_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!g_settings.native || !bus || !city_view(bus)) return 0;
+    return skip_function(cpu);
+}
+
+const int g_scene_registered =
+    gba_mod_register_function_entry_plugin(kSceneHookId, kAfterSortFn, 1, after_sort_hook) &&
+    gba_mod_register_function_entry_plugin(kSceneHookId, kFaceListFn, 1, skip_drawing_hook) &&
+    gba_mod_register_function_entry_plugin(kSceneHookId, kDrawListFn, 1, skip_drawing_hook);
+
+// ---- world ticks and smooth motion ----------------------------------------------
+// The city advances at a fixed 15 ticks a second: the main loop (0x0805DDB8)
+// will not start a tick until four display frames have passed since the last,
+// and everything moves a fixed amount per tick. (Lifting that limit makes the
+// game run four times too fast; it was tried.) A tick is shown when the
+// vertical-blank handler flips the picture, starting with 0x080127EC, which
+// copies the tick's sprite list to hardware OAM.
+//
+// The camera variable changes when the *next* tick starts being computed,
+// some display frames before that tick is shown. So the camera that belongs
+// to the sprites on screen is latched at the flip, together with those
+// sprites, and the last few ticks are kept. Each displayed frame then shows
+// a state part-way between two of them (camera and every sprite), which
+// turns 15 steps a second into continuous motion.
+//
+// Ticks reach the screen 3 to 6 display frames apart, so the blend follows a
+// playback clock instead of the arrival times: it advances a quarter tick
+// per display frame, nudged faster or slower to stay a little over one tick
+// behind the newest. The picture is therefore about 1/12 s behind the game.
+constexpr std::uint32_t kFlipFn = 0x080127ECu;
+struct Tick {
+    float cam_x = 0, cam_y = 0, cam_z = 0, ground_z = 0;
+    float shift = 0;                // sprite columns to subtract (widened view)
+    std::uint8_t oam[1024] = {};
+};
+constexpr int kTickRing = 4;
+Tick g_ticks[kTickRing];            // tick n lives at n % kTickRing
+Tick g_latched;                     // camera of the tick being flipped
+int g_tick_count = 0;               // ticks latched since the city view began
+bool g_flip_pending = false;
+unsigned g_display_frame = 0, g_last_tick_frame = 0;
+double g_play = 0.0;                // playback position, in ticks (index of the tick shown)
+double g_play_rate = 0.25;          // ticks per display frame
+
+const Tick& tick_at(int n) { return g_ticks[n % kTickRing]; }
+int newest_tick() { return g_tick_count - 1; }
+
+int flip_hook(std::uint32_t, int, ArmCpuState*) {
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus || !city_view(bus)) { g_tick_count = 0; return 0; }
+    gtascene::View view;
+    if (!gtascene::read_view(scene_memory(bus), &view)) { g_tick_count = 0; return 0; }
+    g_latched.cam_x = view.cam_x; g_latched.cam_y = view.cam_y; g_latched.cam_z = view.cam_z;
+    g_latched.ground_z = view.ground_z;
+    g_latched.shift = world_sprite_shift(bus->iwram_ptr());
+    g_flip_pending = true;
+    return 0;   // observed only
+}
+
+const int g_flip_registered = gba_mod_register_function_entry_plugin(kSceneHookId, kFlipFn, 1, flip_hook);
+
 void frame_start(const gbarecomp::ExtendedViewFrameInfo*) {
+    if (g_scene_registered && g_flip_registered) gba_mod_set_function_hook_enabled(kSceneHookId, 1);
+    ++g_instance_age;
+    ++g_display_frame;
+    if (g_flip_pending) {
+        // The picture flip ran during the vertical blank just before this
+        // frame: hardware OAM now holds the sprites of the latched tick.
+        g_flip_pending = false;
+        if (gba::GbaBus* bus = gbarecomp::active_bus()) {
+            Tick& t = g_ticks[g_tick_count % kTickRing];
+            t = g_latched;
+            std::memcpy(t.oam, bus->oam_ptr(), sizeof(t.oam));
+            ++g_tick_count;
+            g_last_tick_frame = g_display_frame;
+            // How far behind the new tick playback is. 1.0 would mean it has
+            // just reached the previous one; aim a little further back so it
+            // never has to stop and wait.
+            const double lag = newest_tick() - g_play;
+            if (g_tick_count < 2 || lag > 2.6 || lag < 0.0) {
+                g_play = std::max(0, newest_tick() - 1);
+                g_play_rate = 0.25;
+            } else {
+                const double target = 0.25 * (1.0 + 0.35 * (lag - 1.25));
+                g_play_rate += (std::clamp(target, 0.15, 0.45) - g_play_rate) * 0.5;
+            }
+        }
+    }
+    g_play = std::min(g_play + g_play_rate, static_cast<double>(std::max(0, newest_tick())));
     // The runtime disables every entry hook when it activates mod plugins, so
     // the hook is (re)armed from the per-frame callback.
     if (g_registered) gba_mod_set_function_hook_enabled(kHookId, 1);
@@ -98,6 +237,7 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo*) {
 std::vector<std::uint32_t> g_frame;
 std::vector<float> g_depth;
 double g_phase_ms[4];   // ground, world sprites, buildings, HUD (debug timing)
+float g_shown_cam[2];   // camera of the last composite (debug)
 
 std::uint16_t rd16(const std::uint8_t* p) {
     std::uint16_t v; std::memcpy(&v, p, 2); return v;
@@ -153,37 +293,62 @@ std::uint32_t blend(std::uint32_t src, std::uint32_t dst, unsigned eva, unsigned
 
 // Sprites of the given priorities, sampled per output pixel so rotated and
 // scaled sprites (cars) keep clean edges at any window size.
-void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt, int prio_lo, int prio_hi) {
-    const float world_shift = world_sprite_shift(bus->iwram_ptr());
+//
+// `oam` is the sprite table to draw. For world sprites (priority 1..3)
+// `world_pos`, if given, holds each sprite's bounds corner in the game's own
+// 240-column space (the widened view's offset already removed), possibly
+// between pixels; otherwise it is taken from the table minus `world_shift`.
+struct SpritePos { float x, y; };
+
+void sprite_size(std::uint16_t a0, std::uint16_t a1, int* w, int* h, int* bw, int* bh) {
+    static const std::uint8_t kSize[3][4][2] = {
+        {{8, 8}, {16, 16}, {32, 32}, {64, 64}},
+        {{16, 8}, {32, 8}, {32, 16}, {64, 32}},
+        {{8, 16}, {8, 32}, {16, 32}, {32, 64}}};
+    const int shape = (a0 >> 14) % 3;
+    *w = kSize[shape][a1 >> 14][0]; *h = kSize[shape][a1 >> 14][1];
+    const bool dbl = (a0 & 0x300) == 0x300;
+    *bw = dbl ? *w * 2 : *w; *bh = dbl ? *h * 2 : *h;
+}
+
+bool sprite_shown(std::uint16_t a0) {
+    if (!(a0 & 0x100) && (a0 & 0x200)) return false;    // hidden
+    if (((a0 >> 10) & 3) == 2) return false;            // window sprite
+    return (a0 >> 14) != 3;
+}
+
+// Table position of a sprite's bounds corner. World sprites can sit well
+// right of column 240 in widescreen; only the last 64 column values wrap
+// round to "left of column 0".
+SpritePos table_pos(std::uint16_t a0, std::uint16_t a1, bool world) {
+    int sy = a0 & 0xFF, sx = a1 & 0x1FF;
+    if (sy >= 160) sy -= 256;
+    if (sx >= (world ? 448 : 256)) sx -= 512;
+    return {static_cast<float>(sx), static_cast<float>(sy)};
+}
+
+void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt, int prio_lo, int prio_hi,
+                  const std::uint8_t* oam, float world_shift, const SpritePos* world_pos) {
     if (!(dispcnt & 0x1000)) return;
-    const std::uint8_t* oam = bus->oam_ptr();
     const std::uint8_t* vram = bus->vram_ptr() + 0x10000;
     const std::uint8_t* pal = bus->pal_ptr() + 0x200;
     const bool one_d = dispcnt & 0x40;
     const std::uint16_t bldalpha = bus->io().read16(0x052);
     const unsigned eva = std::min(bldalpha & 31u, 16u), evb = std::min((bldalpha >> 8) & 31u, 16u);
-    static const std::uint8_t kSize[3][4][2] = {
-        {{8, 8}, {16, 16}, {32, 32}, {64, 64}},
-        {{16, 8}, {32, 8}, {32, 16}, {64, 32}},
-        {{8, 16}, {8, 32}, {16, 32}, {32, 64}}};
     for (int pass = prio_hi; pass >= prio_lo; --pass) {
         for (int i = 127; i >= 0; --i) {
             const std::uint16_t a0 = rd16(oam + i * 8), a1 = rd16(oam + i * 8 + 2), a2 = rd16(oam + i * 8 + 4);
-            if (((a2 >> 10) & 3) != pass) continue;
+            if (((a2 >> 10) & 3) != pass || !sprite_shown(a0)) continue;
             const bool affine = a0 & 0x100;
-            if (!affine && (a0 & 0x200)) continue;          // hidden
             const int mode = (a0 >> 10) & 3;
-            if (mode == 2) continue;                        // window sprite
-            const int shape = a0 >> 14;
-            if (shape == 3) continue;
-            const int w = kSize[shape][a1 >> 14][0], h = kSize[shape][a1 >> 14][1];
-            const bool dbl = affine && (a0 & 0x200);
-            const int bw = dbl ? w * 2 : w, bh = dbl ? h * 2 : h;
-            int sy = a0 & 0xFF, sx = a1 & 0x1FF;
-            if (sy >= 160) sy -= 256;
-            // World sprites can sit well right of column 240 in widescreen;
-            // only the last 64 values wrap round to "left of column 0".
-            if (sx >= (pass == 0 ? 256 : 448)) sx -= 512;
+            int w, h, bw, bh;
+            sprite_size(a0, a1, &w, &h, &bw, &bh);
+            SpritePos at = table_pos(a0, a1, pass != 0);
+            if (pass != 0) {
+                if (world_pos) at = world_pos[i];
+                else at.x -= world_shift;
+            }
+            const float sx = at.x, sy = at.y;
             const bool bpp8 = a0 & 0x2000;
             const int tile = a2 & 0x3FF;
             const int palbank = bpp8 ? 0 : (a2 >> 12) * 16;
@@ -196,8 +361,10 @@ void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt, int 
                 pd = static_cast<std::int16_t>(rd16(oam + grp + 30)) / 256.0f;
             }
             const bool flip_x = !affine && (a1 & 0x1000), flip_y = !affine && (a1 & 0x2000);
-            const Anchor anchor = pass == 0 ? hud_anchor(sx, sx + bw, sy, sy + bh) : Anchor::Centre;
-            const float ox = pass == 0 ? anchor_x(l, anchor) : l.box_x - world_shift * l.scale;
+            const Anchor anchor = pass == 0 ? hud_anchor(static_cast<int>(sx), static_cast<int>(sx) + bw,
+                                                         static_cast<int>(sy), static_cast<int>(sy) + bh)
+                                            : Anchor::Centre;
+            const float ox = anchor_x(l, anchor);
             // Screen box of the sprite's picture inside its bounds (in GBA
             // pixels from the bounds' corner). A rotated or shrunk sprite
             // covers much less than its bounds, which are often double size.
@@ -353,6 +520,62 @@ void in_bands(const gtascene::View& view, Draw draw) {
     for (std::thread& t : threads) t.join();
 }
 
+// Fills `view` and `positions` with the state a fraction `f` of the way from
+// tick `a` to tick `b`. False when the two ticks should not be blended (the
+// camera jumped).
+//
+// Each sprite of `b` is paired with the nearest sprite of `a` of the same
+// size and priority, preferring one with the same picture. A sprite with no
+// partner is taken to be standing still in the world, so it moves with the
+// ground rather than popping.
+bool interpolate_ticks(const Tick& a, const Tick& b, float f, gtascene::View* view, SpritePos* positions) {
+    const float dx = b.cam_x - a.cam_x, dy = b.cam_y - a.cam_y;
+    if (std::fabs(dx) > 96.0f || std::fabs(dy) > 96.0f || std::fabs(b.cam_z - a.cam_z) > 48.0f) return false;
+    view->cam_x = a.cam_x + dx * f;
+    view->cam_y = a.cam_y + dy * f;
+    view->cam_z = a.cam_z + (b.cam_z - a.cam_z) * f;
+    view->ground_z = a.ground_z + (b.ground_z - a.ground_z) * f;
+
+    // Screen pixels the ground moved between the ticks (240-column space).
+    const float pixels_per_unit = 118.0f / b.ground_z;
+    const float scroll_x = dx * pixels_per_unit, scroll_y = dy * pixels_per_unit;
+    const float reach = std::max(std::fabs(scroll_x), std::fabs(scroll_y)) + 14.0f;
+    bool used[128] = {};
+    for (int i = 0; i < 128; ++i) {
+        const std::uint16_t a0 = rd16(b.oam + i * 8), a1 = rd16(b.oam + i * 8 + 2), a2 = rd16(b.oam + i * 8 + 4);
+        const int prio = (a2 >> 10) & 3;
+        if (prio == 0 || !sprite_shown(a0)) continue;
+        SpritePos to = table_pos(a0, a1, true);
+        to.x -= b.shift;
+        // Where it was if it stands still in the world.
+        SpritePos from = {to.x + scroll_x, to.y + scroll_y};
+        int best = -1;
+        float best_cost = 1e9f;
+        for (int j = 0; j < 128; ++j) {
+            if (used[j]) continue;
+            const std::uint16_t b0 = rd16(a.oam + j * 8), b1 = rd16(a.oam + j * 8 + 2), b2 = rd16(a.oam + j * 8 + 4);
+            if (((b2 >> 10) & 3) != prio || !sprite_shown(b0)) continue;
+            if ((b0 & 0xE300) != (a0 & 0xE300) || (b1 & 0xC000) != (a1 & 0xC000)) continue;   // shape, size, kind
+            SpritePos was = table_pos(b0, b1, true);
+            was.x -= a.shift;
+            // Distance from where it is now, or from where a still object was.
+            const float moved = std::max(std::fabs(was.x - to.x), std::fabs(was.y - to.y));
+            const float still = std::max(std::fabs(was.x - from.x), std::fabs(was.y - from.y));
+            float cost = std::min(moved, still);
+            if (cost > reach) continue;
+            if ((b2 & 0xF3FF) != (a2 & 0xF3FF)) cost += 6.0f;      // different picture or palette
+            if (cost < best_cost) { best_cost = cost; best = j; }
+        }
+        if (best >= 0) {
+            used[best] = true;
+            from = table_pos(rd16(a.oam + best * 8), rd16(a.oam + best * 8 + 2), true);
+            from.x -= a.shift;
+        }
+        positions[i] = {from.x + (to.x - from.x) * f, from.y + (to.y - from.y) * f};
+    }
+    return true;
+}
+
 // Builds the composite into g_frame. False when the game is not showing the
 // city right now (menus, cutscenes, loading).
 bool compose(int out_w, int out_h) {
@@ -362,13 +585,48 @@ bool compose(int out_w, int out_h) {
     // The city view is video mode 1 with the building and ground layers on.
     if ((dispcnt & 7u) != 1u || (dispcnt & 0x0500) != 0x0500 || (dispcnt & 0x80)) return false;
 
-    gtascene::Memory mem;
-    mem.ewram = bus->ewram_ptr(); mem.iwram = bus->iwram_ptr();
-    mem.rom = bus->rom_ptr(); mem.rom_size = bus->rom_size();
-    mem.palette = bus->pal_ptr();
+    const gtascene::Memory mem = scene_memory(bus);
     gtascene::View view;
     if (!gtascene::read_view(mem, &view)) return false;
     view.width = out_w; view.height = out_h;
+
+    // What to show: the latched tick, or a state part-way from the previous
+    // tick to it. Without any latched tick yet, the live state.
+    const std::uint8_t* world_oam = bus->oam_ptr();
+    float world_shift = world_sprite_shift(bus->iwram_ptr());
+    static SpritePos positions[128];
+    const SpritePos* world_pos = nullptr;
+    if (g_tick_count >= 1 && g_display_frame - g_last_tick_frame < 40) {
+        const int newest = newest_tick();
+        int shown = newest;                         // tick whose sprites are drawn
+        float f = 1.0f;
+        const int from = static_cast<int>(g_play);
+        if (g_settings.smooth && from < newest && newest - from < kTickRing - 1) {
+            shown = from + 1;
+            f = static_cast<float>(g_play - from);
+        }
+        const Tick& cur = tick_at(shown);
+        view.cam_x = cur.cam_x; view.cam_y = cur.cam_y; view.cam_z = cur.cam_z; view.ground_z = cur.ground_z;
+        world_oam = cur.oam;
+        world_shift = cur.shift;
+        if (f < 1.0f) {
+            if (interpolate_ticks(tick_at(shown - 1), cur, f, &view, positions)) world_pos = positions;
+            else g_play = newest;                   // a cut: nothing to blend, catch up
+        }
+    }
+
+    // No copy of the building list yet, or the game has stopped refreshing
+    // it (it only re-sorts when the camera moves or every few frames): read
+    // the live list, keeping the old copy if it is mid-update.
+    if (g_instance_count < 0 || g_instance_age > 30) {
+        static gtascene::Instance fresh[kMaxInstances];
+        const int n = gtascene::read_instances(mem, fresh, kMaxInstances);
+        if (n > 0 && (g_instance_count < 0 || n * 2 >= g_instance_count)) {
+            std::copy(fresh, fresh + n, g_instances);
+            g_instance_count = n;
+        }
+    }
+    if (g_instance_count < 0) g_instance_count = 0;
 
     const std::size_t pixels = static_cast<std::size_t>(out_w) * out_h;
     g_frame.resize(pixels);
@@ -385,17 +643,18 @@ bool compose(int out_w, int out_h) {
         g_phase_ms[i] = std::chrono::duration<double, std::milli>(now - mark).count();
         mark = now;
     };
+    g_shown_cam[0] = view.cam_x; g_shown_cam[1] = view.cam_y;
     in_bands(view, [&](const gtascene::View& band) { gtascene::draw_ground(mem, band, g_frame.data()); });
     lap(0);
-    draw_objects(l, bus, dispcnt, 3, 3);
+    draw_objects(l, bus, dispcnt, 3, 3, world_oam, world_shift, world_pos);
     lap(1);
     in_bands(view, [&](const gtascene::View& band) {
-        gtascene::draw_buildings(mem, band, g_frame.data(), g_depth.data());
+        gtascene::draw_buildings(mem, band, g_instances, g_instance_count, g_frame.data(), g_depth.data());
     });
     lap(2);
-    draw_objects(l, bus, dispcnt, 1, 2);
+    draw_objects(l, bus, dispcnt, 1, 2, world_oam, world_shift, world_pos);
     if (dispcnt & 0x0200) draw_text_bg(l, bus, 1);
-    draw_objects(l, bus, dispcnt, 0, 0);
+    draw_objects(l, bus, dispcnt, 0, 0, bus->oam_ptr(), 0.0f, nullptr);
     apply_fade(bus->io().read16(0x050), bus->io().read16(0x054));
     lap(3);
     return true;
@@ -458,6 +717,8 @@ int gta_debug_tcp_command(const char* request,
     find_uint(request, "\"w\"", &w);
     find_uint(request, "\"h\"", &h);
     if (find_uint(request, "\"native\"", &native)) g_settings.native = native != 0;
+    unsigned long long smooth = 1;
+    if (find_uint(request, "\"smooth\"", &smooth)) g_settings.smooth = smooth != 0;
     // Headless runs have no window: the shot's own shape drives the widening
     // (it takes effect from the game's next camera update).
     g_wide_factor.store(std::max(1.0f, (w * 160.0f) / (h * 240.0f)), std::memory_order_relaxed);
@@ -466,10 +727,11 @@ int gta_debug_tcp_command(const char* request,
     const bool drawn = compose(static_cast<int>(w), static_cast<int>(h));
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     const bool ok = drawn && gta_scene_debug_shot("scene_shot.ppm", static_cast<int>(w), static_cast<int>(h));
-    char reply[200];
+    char reply[280];
     if (ok) std::snprintf(reply, sizeof(reply),
-                          "{\"ok\":true,\"ms\":%.2f,\"ground\":%.2f,\"sprites\":%.2f,\"buildings\":%.2f,\"hud\":%.2f}",
-                          ms, g_phase_ms[0], g_phase_ms[1], g_phase_ms[2], g_phase_ms[3]);
+                          "{\"ok\":true,\"ticks\":%d,\"frame\":%u,\"tick_frames\":[%u,%u],\"cam_x\":%.3f,\"cam_y\":%.3f,\"ms\":%.2f,\"ground\":%.2f,\"sprites\":%.2f,\"buildings\":%.2f,\"hud\":%.2f}",
+                          g_tick_count, g_display_frame, g_last_tick_frame, static_cast<unsigned>(g_play * 100),
+                          static_cast<double>(g_shown_cam[0]), static_cast<double>(g_shown_cam[1]), ms, g_phase_ms[0], g_phase_ms[1], g_phase_ms[2], g_phase_ms[3]);
     else std::snprintf(reply, sizeof(reply), "{\"ok\":false,\"error\":\"not in the city view\"}");
     write(write_ctx, reply, std::strlen(reply));
     return 1;

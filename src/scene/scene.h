@@ -25,6 +25,19 @@ struct View {
     int row_begin = 0, row_end = 0;
 };
 
+// One building instance, copied out of the game's list at a moment when the
+// list is whole (the game relinks it over several display frames).
+struct Instance {
+    std::uint32_t model = 0;
+    std::int32_t x = 0, y = 0, z = 0;       // 16.16 world position
+    std::int32_t box[6] = {};               // min xyz, max xyz around the position
+    std::uint8_t state = 0, placement = 0;
+};
+
+// Walks the game's instance list. Returns the number copied (at most `max`),
+// or -1 if the list is not walkable right now.
+int read_instances(const Memory& mem, Instance* out, int max);
+
 // True while a city is loaded and the camera is valid; fills the camera.
 bool read_view(const Memory& mem, View* view);
 
@@ -33,6 +46,7 @@ void draw_ground(const Memory& mem, const View& view, std::uint32_t* argb);
 
 // Buildings, drawn over whatever is already in `argb`. `depth` is scratch
 // space of width*height floats.
-void draw_buildings(const Memory& mem, const View& view, std::uint32_t* argb, float* depth);
+void draw_buildings(const Memory& mem, const View& view, const Instance* instances, int count,
+                    std::uint32_t* argb, float* depth);
 
 }  // namespace gtascene

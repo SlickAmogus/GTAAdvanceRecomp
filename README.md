@@ -77,10 +77,15 @@ are drawn on the PC straight from the game's world data:
   to the sides instead of bars, and the game is told about the extra width so
   people and traffic exist there too. The radar keeps to the left edge, the
   status block and district name to the right;
+- **Smooth motion** (on by default): the game moves its world only 15 times a
+  second. The renderer shows the steps in between, so scrolling, people and
+  traffic move continuously; the picture is then about 1/12 s behind the
+  game. Turn it off for the original stepping.
 - **Render resolution** trades sharpness for speed or a chunkier look.
 
-People, cars and the HUD are the game's own sprites, scaled up. The game still
-draws its own picture underneath; it is simply not shown. Turning the option
+People, cars and the HUD are the game's own sprites, scaled up. The game's own
+building rasteriser is skipped while the option is on (its pixels would not be
+shown). Turning the option
 off shows the untouched 240x160 picture. Menus and cutscenes are always the
 original picture.
 

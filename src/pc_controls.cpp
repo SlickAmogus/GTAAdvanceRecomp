@@ -31,6 +31,7 @@ constexpr char kKeyMouse[]  = "gta.mouse_buttons";
 constexpr char kKeyFilter[] = "gta.filter";
 constexpr char kKeyNative[] = "gta.native_renderer";
 constexpr char kKeyResolution[] = "gta.resolution";
+constexpr char kKeySmooth[] = "gta.smooth";
 
 struct Settings {
     int layout = 1;         // WASD layout on
@@ -64,6 +65,7 @@ void load_settings(const char* argv0) {
         else if (!std::strcmp(key, "filter")) g_settings.filter = clamp(value, 0, 2);
         else if (!std::strcmp(key, "native_renderer")) gta_scene_settings()->native = value != 0;
         else if (!std::strcmp(key, "resolution")) gta_scene_settings()->resolution = clamp(value, 0, 4);
+        else if (!std::strcmp(key, "smooth_motion")) gta_scene_settings()->smooth = value != 0;
     }
     std::fclose(f);
 }
@@ -96,8 +98,11 @@ void ensure_hotkeys(const std::filesystem::path& dir) {
 void save_settings() {
     std::FILE* f = std::fopen(g_settings_path.c_str(), "w");
     if (!f) return;
-    std::fprintf(f, "pc_layout = %d\nmouse_buttons = %d\nfullscreen = %d\nfilter = %d\n",
-                 g_settings.layout, g_settings.mouse, g_settings.fullscreen, g_settings.filter);
+    std::fprintf(f, "pc_layout = %d\nmouse_buttons = %d\nfullscreen = %d\nfilter = %d\n"
+                    "native_renderer = %d\nresolution = %d\nsmooth_motion = %d\n",
+                 g_settings.layout, g_settings.mouse, g_settings.fullscreen, g_settings.filter,
+                 gta_scene_settings()->native, gta_scene_settings()->resolution,
+                 gta_scene_settings()->smooth);
     std::fclose(f);
 }
 
@@ -189,6 +194,12 @@ const RecompRuntimeUiItem kItems[] = {
      "Resolution of the native city view relative to the window. Lower values are "
      "faster and give a chunkier, more retro look.",
      RECOMP_RUNTIME_UI_CHOICE, 0, 4, 1, kResolutionChoices, 5, nullptr},
+    {kKeySmooth, "Graphics", "Smooth motion",
+     "The game moves the world 15 times a second. With this on, the native "
+     "renderer shows the steps in between, so scrolling, people and traffic "
+     "move smoothly; the picture is then one step (1/15 s) behind the game. "
+     "Turn off for the original stepping.",
+     RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
     {kKeyLayout, "Controls", "WASD layout",
      "W/A/S/D move and steer. Left Ctrl or J: attack / accelerate. Left Shift or K: "
      "sprint / reverse. Space: strafe / handbrake. F: enter or exit a car. C: jump / "
@@ -211,6 +222,7 @@ int ui_get(const char* key, int* out) {
     else if (!std::strcmp(key, kKeyFilter)) *out = g_settings.filter;
     else if (!std::strcmp(key, kKeyNative)) *out = gta_scene_settings()->native;
     else if (!std::strcmp(key, kKeyResolution)) *out = gta_scene_settings()->resolution;
+    else if (!std::strcmp(key, kKeySmooth)) *out = gta_scene_settings()->smooth;
     else return 0;
     return 1;
 }
@@ -221,6 +233,7 @@ int ui_set(const char* key, int value) {
     else if (!std::strcmp(key, kKeyFilter)) g_settings.filter = clamp(value, 0, 2);
     else if (!std::strcmp(key, kKeyNative)) gta_scene_settings()->native = value != 0;
     else if (!std::strcmp(key, kKeyResolution)) gta_scene_settings()->resolution = clamp(value, 0, 4);
+    else if (!std::strcmp(key, kKeySmooth)) gta_scene_settings()->smooth = value != 0;
     else return 0;
     save_settings();
     return 1;

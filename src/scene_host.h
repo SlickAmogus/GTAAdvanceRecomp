@@ -8,6 +8,7 @@
 struct GtaSceneSettings {
     int native = 1;          // 0 = the game's own 240x160 picture
     int resolution = 0;      // 0 = window resolution, then 75 / 50 / 33 / 25 %
+    int smooth = 1;          // blend between the game's 15 world ticks a second
 };
 GtaSceneSettings* gta_scene_settings();
 

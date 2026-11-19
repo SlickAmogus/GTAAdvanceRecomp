@@ -68,6 +68,39 @@ Sprites are limited to this rectangle and their screen column is
 releases a sprite whose left edge passes column 240 (`cmp r0, #0xF0` at
 `0x08014650`). The widescreen hook widens `0x50 / 0x58` and that limit.
 
+## Timing: 15 world ticks a second
+
+The city's main loop (`0x0805DDB8`) runs one world tick (`0x08051030`:
+camera, entities, building pass `0x0800D2B0`, sprites) and then waits for the
+picture flip **and** until at least four display frames have passed since the
+last tick:
+
+```
+0805DE76  ldr r0, [r6]      ; EWRAM 0x02035CA8, display frames so far
+0805DE7A  cmp r0, #3
+0805DE7C  ble wait
+```
+
+Everything moves a fixed amount per tick, so this is the game's speed, not a
+performance cap: with the limit lowered the game simply runs up to four times
+too fast (tried). `IWRAM 0x03000000` holds the display frames the last tick
+took (capped at 5) but movement does not scale with it.
+
+The vertical-blank handler (`0x08000220`) flips the picture when a tick is
+ready (state byte `EWRAM 0x02000130`): it streams the ground (`0x08010544`)
+and copies the tick's sprite list to hardware OAM (`0x080127EC`, first call of
+the flip). Flips land 3 to 6 display frames apart.
+
+The camera variable (`IWRAM 0x14`) changes at the start of the *next* tick's
+computation, a few display frames before that tick is flipped. The camera
+that belongs to the sprites on screen is therefore the one current at the
+flip; the native renderer latches it there.
+
+The building instance list is re-sorted and relinked inside `0x0800D2B0`
+(`0x0800D180`), and instances stream in and out across display frames, so
+between flips the list is often incomplete. `0x0800E3E4` is the first call
+after the sort; the renderer copies the list there.
+
 ## Ground
 
 World units to ground texels: multiply by `0x28 / 64 = 0.625`. One tile is 8

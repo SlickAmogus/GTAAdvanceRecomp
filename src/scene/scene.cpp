@@ -218,7 +218,27 @@ void draw_ground(const Memory& mem, const View& view, std::uint32_t* argb) {
     }
 }
 
-void draw_buildings(const Memory& mem, const View& view, std::uint32_t* argb, float* depth) {
+int read_instances(const Memory& mem, Instance* out, int max) {
+    const Reader r{mem};
+    int count = 0;
+    std::uint32_t inst = r.u32(kInstanceHead);
+    for (int guard = 0; inst; ++guard, inst = r.u32(inst + 0x14)) {
+        if (guard >= 1024 || !r.at(inst, 0x20)) return -1;
+        const std::uint32_t box = r.u32(inst + 0x10);
+        if (!r.at(box, 24)) return -1;
+        if (count >= max) break;
+        Instance& o = out[count++];
+        o.model = r.u32(inst);
+        o.x = r.s32(inst + 4); o.y = r.s32(inst + 8); o.z = r.s32(inst + 12);
+        for (int i = 0; i < 6; ++i) o.box[i] = r.s32(box + i * 4);
+        o.state = r.u8(inst + 0x1E);
+        o.placement = r.u8(inst + 0x1F);
+    }
+    return count;
+}
+
+void draw_buildings(const Memory& mem, const View& view, const Instance* instances, int count,
+                    std::uint32_t* argb, float* depth) {
     const Reader r{mem};
     std::uint32_t lut[256];
     build_palette(mem, lut);
@@ -234,27 +254,25 @@ void draw_buildings(const Memory& mem, const View& view, std::uint32_t* argb, fl
     // Half the visible width in world units per unit of depth (for culling).
     const float reach_x = cx / focal;
 
-    std::uint32_t inst = r.u32(kInstanceHead);
-    for (int guard = 0; inst && guard < 1024; ++guard, inst = r.u32(inst + 0x14)) {
-        if (!r.at(inst, 0x20)) break;
-        const std::uint32_t model = r.u32(inst);
+    for (int n = 0; n < count; ++n) {
+        const Instance& inst = instances[n];
+        const std::uint32_t model = inst.model;
         const std::uint32_t geo = r.u32(model + 4);
-        const std::uint32_t box = r.u32(inst + 0x10);
-        if (!geo || !r.at(geo, 0x48) || !r.at(box, 24)) continue;
+        if (!geo || !r.at(geo, 0x48)) continue;
         // Camera relative to the instance, as the game computes it.
-        const float dx = view.cam_x - r.s32(inst + 4) / 65536.0f;
-        const float dy = view.cam_y - r.s32(inst + 8) / 65536.0f;
-        const float dz = view.cam_z - r.s32(inst + 12) / 65536.0f;
+        const float dx = view.cam_x - inst.x / 65536.0f;
+        const float dy = view.cam_y - inst.y / 65536.0f;
+        const float dz = view.cam_z - inst.z / 65536.0f;
         {   // Bounding box against the view (world y grows down the screen).
-            const float top_depth = std::max(kNear, dz - r.s32(box + 20));
-            const float x_lo = r.s32(box) - dx, x_hi = r.s32(box + 12) - dx;
-            const float y_lo = r.s32(box + 4) - dy, y_hi = r.s32(box + 16) - dy;
+            const float top_depth = std::max(kNear, dz - inst.box[5]);
+            const float x_lo = inst.box[0] - dx, x_hi = inst.box[3] - dx;
+            const float y_lo = inst.box[1] - dy, y_hi = inst.box[4] - dy;
             if (x_lo > reach_x * dz && x_lo > reach_x * top_depth) continue;
             if (x_hi < -reach_x * dz && x_hi < -reach_x * top_depth) continue;
             if (y_lo > band_down * dz && y_lo > band_down * top_depth) continue;
             if (y_hi < -band_up * dz && y_hi < -band_up * top_depth) continue;
         }
-        const std::uint8_t state = r.u8(inst + 0x1E), placement = r.u8(inst + 0x1F);
+        const std::uint8_t state = inst.state, placement = inst.placement;
         const int frame = state & 0x7F;
         std::uint32_t face = r.u32(geo + 0x38 + (placement & 3) * 4);
         const int count = r.u16(geo + 0x34);
