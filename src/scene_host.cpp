@@ -155,6 +155,25 @@ const int g_scene_registered =
     gba_mod_register_function_entry_plugin(kSceneHookId, kFaceListFn, 1, skip_drawing_hook) &&
     gba_mod_register_function_entry_plugin(kSceneHookId, kDrawListFn, 1, skip_drawing_hook);
 
+// Where the player is in the world, from the game: EWRAM 0x02000F10 is the
+// player record, its first word the player's character object, whose word at
+// +0x14 points at the position it is drawn from (16.16 x, y). In a car that
+// position is the car's.
+bool gta_player_position(gba::GbaBus* bus, float* x, float* y) {
+    const std::uint8_t* ew = bus->ewram_ptr();
+    auto word = [&](std::uint32_t addr, std::uint32_t* out) {
+        if (addr < 0x02000000u || addr > 0x0203FFFCu) return false;
+        std::memcpy(out, ew + (addr - 0x02000000u), 4);
+        return true;
+    };
+    std::uint32_t object = 0, position = 0, px = 0, py = 0;
+    if (!word(0x02000F10u, &object) || !word(object + 0x14, &position)) return false;
+    if (!word(position, &px) || !word(position + 4, &py)) return false;
+    *x = static_cast<std::int32_t>(px) / 65536.0f;
+    *y = static_cast<std::int32_t>(py) / 65536.0f;
+    return *x > 0.0f && *y > 0.0f && *x < 32768.0f && *y < 32768.0f;
+}
+
 // ---- world ticks and smooth motion ----------------------------------------------
 // The city advances at a fixed 15 ticks a second: the main loop (0x0805DDB8)
 // will not start a tick until four display frames have passed since the last,
@@ -178,6 +197,8 @@ constexpr std::uint32_t kFlipFn = 0x080127ECu;
 struct Tick {
     float cam_x = 0, cam_y = 0, cam_z = 0, ground_z = 0;
     float shift = 0;                // sprite columns to subtract (widened view)
+    bool has_player = false;
+    float player_x = 0, player_y = 0;   // world position of the player (or their car)
     std::uint8_t oam[1024] = {};
 };
 constexpr int kTickRing = 4;
@@ -203,6 +224,7 @@ int flip_hook(std::uint32_t, int, ArmCpuState*) {
     g_latched.cam_x = view.cam_x; g_latched.cam_y = view.cam_y; g_latched.cam_z = view.cam_z;
     g_latched.ground_z = view.ground_z;
     g_latched.shift = world_sprite_shift(bus->iwram_ptr());
+    g_latched.has_player = gta_player_position(bus, &g_latched.player_x, &g_latched.player_y);
     g_flip_pending = true;
     return 0;   // observed only
 }
@@ -643,47 +665,20 @@ bool interpolate_ticks(const Tick& a, const Tick& b, float f, gtascene::View* vi
 // player completely. The native picture draws the player's sprites a second
 // time, see-through, over the buildings.
 //
-// Which sprites are the player's is not read from the game: the camera
-// follows the player, so theirs are the world sprites that stay put on
-// screen while the ground scrolls. The spot is remembered while standing
-// still, and every world sprite covering it counts (the player, or the car
-// they are in).
+// The player's spot on screen comes from the game's own record of where the
+// player is (gta_player_position), projected like the ground; every world
+// sprite covering that spot counts: the player on foot, or the car they are
+// in.
 float g_focus_x = 120.0f, g_focus_y = 88.0f;    // 240-column space
 bool g_focus_known = false;
+int g_marked = 0;             // sprites drawn as the player last time (debug)
 
-void track_player(const Tick& a, const Tick& b) {
-    const float pixels_per_unit = 118.0f / b.ground_z;
-    const float scroll_x = (b.cam_x - a.cam_x) * pixels_per_unit, scroll_y = (b.cam_y - a.cam_y) * pixels_per_unit;
-    if (std::max(std::fabs(scroll_x), std::fabs(scroll_y)) < 5.0f) return;      // nothing to tell apart
-    // Middle of each world sprite's bounds. The player's picture changes
-    // shape from one animation frame to the next, but its middle stays put.
-    auto centres = [](const Tick& t, float (*out)[2]) {
-        int n = 0;
-        for (int i = 0; i < 128; ++i) {
-            const std::uint16_t a0 = rd16(t.oam + i * 8), a1 = rd16(t.oam + i * 8 + 2), a2 = rd16(t.oam + i * 8 + 4);
-            if (((a2 >> 10) & 3) == 0 || !sprite_shown(a0)) continue;
-            int w, h, bw, bh;
-            sprite_size(a0, a1, &w, &h, &bw, &bh);
-            const SpritePos at = table_pos(a0, a1, true);
-            out[n][0] = at.x - t.shift + bw * 0.5f; out[n][1] = at.y + bh * 0.5f;
-            ++n;
-        }
-        return n;
-    };
-    static float was[128][2], now[128][2];
-    const int was_count = centres(a, was), now_count = centres(b, now);
-    float best = 1e9f, bx = 0, by = 0;
-    for (int i = 0; i < now_count; ++i) {
-        bool stayed = false;
-        for (int j = 0; j < was_count && !stayed; ++j)
-            stayed = std::fabs(was[j][0] - now[i][0]) <= 4.0f && std::fabs(was[j][1] - now[i][1]) <= 4.0f;
-        if (!stayed) continue;
-        // Prefer the one nearest where the player was (or the middle of the
-        // screen the first time).
-        const float d = std::fabs(now[i][0] - g_focus_x) + std::fabs(now[i][1] - g_focus_y);
-        if (d < best) { best = d; bx = now[i][0]; by = now[i][1]; }
-    }
-    if (best < (g_focus_known ? 48.0f : 80.0f)) { g_focus_x = bx; g_focus_y = by; g_focus_known = true; }
+void locate_player(const Tick& t) {
+    g_focus_known = t.has_player;
+    if (!t.has_player) return;
+    const float pixels_per_unit = 118.0f / t.ground_z;
+    g_focus_x = 120.0f + (t.player_x - t.cam_x) * pixels_per_unit;
+    g_focus_y = 120.0f + (t.player_y - t.cam_y) * pixels_per_unit;
 }
 
 // Marks the world sprites of `oam` that cover the player's spot.
@@ -698,8 +693,9 @@ bool mark_player(const std::uint8_t* oam, float shift, bool* marked) {
         SpritePos at = table_pos(a0, a1, true);
         at.x -= shift;
         // The picture sits in the middle of the bounds (double-size sprites
-        // have a wide empty border).
-        const float mx = (bw - w) * 0.5f + 2.0f, my = (bh - h) * 0.5f + 2.0f;
+        // have a wide empty border). A few pixels of slack: the spot is the
+        // player's feet, the sprite is drawn around them.
+        const float mx = (bw - w) * 0.5f - 6.0f, my = (bh - h) * 0.5f - 6.0f;
         if (g_focus_x < at.x + mx || g_focus_x >= at.x + bw - mx) continue;
         if (g_focus_y < at.y + my || g_focus_y >= at.y + bh - my) continue;
         marked[i] = any = true;
@@ -727,6 +723,7 @@ bool compose(int out_w, int out_h, float phase) {
     float world_shift = world_sprite_shift(bus->iwram_ptr());
     static SpritePos positions[128];
     const SpritePos* world_pos = nullptr;
+    const Tick* shown_tick = nullptr;       // the tick whose sprites are drawn
     if (g_tick_count >= 1 && g_display_frame - g_last_tick_frame < 40) {
         const int newest = newest_tick();
         int shown = newest;                         // tick whose sprites are drawn
@@ -744,6 +741,7 @@ bool compose(int out_w, int out_h, float phase) {
         view.cam_x = cur.cam_x; view.cam_y = cur.cam_y; view.cam_z = cur.cam_z; view.ground_z = cur.ground_z;
         world_oam = cur.oam;
         world_shift = cur.shift;
+        shown_tick = &cur;
         if (f < 1.0f) {
             if (interpolate_ticks(tick_at(shown - 1), cur, f, &view, positions)) world_pos = positions;
             else g_play = newest;                   // a cut: nothing to blend, catch up
@@ -775,10 +773,12 @@ bool compose(int out_w, int out_h, float phase) {
     g_shown_cam[0] = view.cam_x; g_shown_cam[1] = view.cam_y;
     static bool player[128];
     bool show_player = false;
-    if (g_settings.show_player && g_tick_count >= 2 && world_oam != bus->oam_ptr()) {
-        track_player(tick_at(newest_tick() - 1), tick_at(newest_tick()));
+    if (g_settings.show_player && shown_tick) {
+        locate_player(*shown_tick);
         show_player = g_focus_known && mark_player(world_oam, world_shift, player);
     }
+    g_marked = 0;
+    if (show_player) for (bool m : player) g_marked += m;
     static BandPool pool;
     const std::uint16_t bldcnt = bus->io().read16(0x050), bldy = bus->io().read16(0x054);
     const int bands = std::min(pool.bands(), std::max(1, out_h / 48));
@@ -898,7 +898,7 @@ int gta_debug_tcp_command(const char* request,
     char reply[280];
     if (ok) std::snprintf(reply, sizeof(reply),
                           "{\"ok\":true,\"ticks\":%d,\"frame\":%u,\"player\":[%d,%.1f,%.1f],\"cam_x\":%.3f,\"cam_y\":%.3f,\"ms\":%.2f}",
-                          g_tick_count, g_display_frame, g_focus_known ? 1 : 0,
+                          g_tick_count, g_display_frame, g_marked,
                           static_cast<double>(g_focus_x), static_cast<double>(g_focus_y), static_cast<double>(g_shown_cam[0]),
                           static_cast<double>(g_shown_cam[1]), ms);
     else std::snprintf(reply, sizeof(reply), "{\"ok\":false,\"error\":\"not in the city view\"}");
