@@ -27,8 +27,15 @@ GTAAdvance/
   GTAAdvanceRecomp/                    this repository
 ```
 
-Apply the patches to the `gbarecomp` checkout before building (they are the
-same ones the Duke Nukem Advance recomp uses):
+The simplest way to get a framework checkout with everything applied is the
+fork that carries these changes:
+
+```
+git clone --recurse-submodules -b pc-ports https://github.com/SlickAmogus/gbarecomp
+```
+
+To start from upstream `mstan/gbarecomp` instead, apply the patches (the same
+ones the Duke Nukem Advance recomp uses):
 
 ```
 cd gbarecomp
@@ -104,19 +111,25 @@ original picture.
 
 The original bindings (arrows, X = A, Z = B, ...) keep working.
 
+**Mouse in the game's menus** (main menu, pause menu, save slots): point at
+an entry to select it, left click to choose it, right click to go back. On
+screens without a list (dialogue, title) a left click continues. The pointer
+is hidden while you are in the city.
+
 ## Repository map
 
 | Path | What |
 |---|---|
 | `src/main.cpp` | Host entry point |
 | `src/pc_controls.cpp` | Keyboard/mouse layout, its menu rows and settings |
+| `src/menu_mouse.cpp` | Mouse pointing in the game's own menus |
 | `src/scene/` | Native renderer (ground and buildings from the game's world data) |
 | `src/scene_host.cpp` | Composites the native scene with the game's sprites and HUD; widescreen hooks |
 | `docs/ENGINE_NOTES.md` | What is known about the game's engine and data formats |
 | `recomp.toml` | Hand-written recompiler config (entry points, RAM-copied routines) |
 | `tools/scan_seeds.py` | Finds pointer-table functions and computed-jump landings |
 | `tools/drive.py` | Headless, muted test driver over the debug server |
-| `tools/re/` | Reverse-engineering and comparison tools (Ghidra scripts, native-vs-game shots) |
+| `tools/re/` | Reverse-engineering and test tools (Ghidra scripts, native-vs-game shots, smoothness and menu checks) |
 | `patches/` | Fixes to apply to the gbarecomp checkout |
 
 ## Licensing

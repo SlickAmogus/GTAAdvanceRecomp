@@ -4,6 +4,7 @@
 // (window, audio, input, saves, PPU) comes from the shared gbarecomp runtime.
 #include "runtime.h"
 #include "pc_controls.h"
+#include "menu_mouse.h"
 #include "scene_host.h"
 
 #include <cstring>
@@ -15,6 +16,14 @@
 // raises Display > Resolution scale; buildings (BG0), HUD and sprites keep
 // their original pixels.
 static bool ground_layer_is_affine(int bg, int) { return bg == 2; }
+
+// Game-owned debug server commands (headless testing).
+static int debug_tcp_command(const char* request,
+                             void (*write)(void* ctx, const char* data, std::size_t len),
+                             void* write_ctx) {
+    return gta_menu_tcp_command(request, write, write_ctx) ||
+           gta_debug_tcp_command(request, write, write_ctx);
+}
 
 int main(int argc, char** argv) {
     // Launcher-seam flags are sent by framework tooling (replay_diagnostic.py)
@@ -39,7 +48,7 @@ int main(int argc, char** argv) {
     opts.freely_resizable_window = true;
     opts.show_fps_by_default = true;
     opts.high_resolution_affine_provider = ground_layer_is_affine;
-    opts.tcp_command = gta_debug_tcp_command;
+    opts.tcp_command = debug_tcp_command;
     gta_scene_install(&opts);
     gta_pc_controls_install(&opts, argv[0]);
 

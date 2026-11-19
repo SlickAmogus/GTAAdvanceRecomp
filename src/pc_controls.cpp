@@ -10,6 +10,7 @@
 //
 // Everything here only presses pad buttons; no guest memory is written.
 #include "pc_controls.h"
+#include "menu_mouse.h"
 #include "scene_host.h"
 
 #include <SDL.h>
@@ -137,9 +138,19 @@ constexpr int kCycleLead = 3, kCyclePress = 5, kCycleGap = 4;
 
 std::uint16_t input_frame(const gbarecomp::TouchFrameInfo*) {
     std::uint16_t keys = 0x03FF;
+    // In the game's menus the mouse points and clicks; in the city its
+    // buttons are attack and sprint.
+    const bool in_menu = g_settings.mouse && gta_menu_mouse(&keys);
     // Headless runs never open a window, and no SDL call is made then.
     if (!SDL_WasInit(SDL_INIT_VIDEO)) return keys;
     remember_display_mode();
+    // The pointer is for the game's menus; in the city it would only sit on
+    // top of the picture. (The Esc menu shows it again by itself.)
+    static int cursor_shown = -1;
+    if (cursor_shown != (in_menu ? 1 : 0)) {
+        cursor_shown = in_menu ? 1 : 0;
+        SDL_ShowCursor(in_menu ? SDL_ENABLE : SDL_DISABLE);
+    }
     if (!SDL_GetKeyboardFocus()) return keys;
     auto press = [&](int bit) { keys &= static_cast<std::uint16_t>(~(1u << bit)); };
 
@@ -171,7 +182,7 @@ std::uint16_t input_frame(const gbarecomp::TouchFrameInfo*) {
             if (g_cycle_timer < kCycleGap + kCyclePress) press(g_cycle_dir < 0 ? kL : kR);
         }
     }
-    if (g_settings.mouse) {
+    if (g_settings.mouse && !in_menu) {
         const Uint32 buttons = SDL_GetMouseState(nullptr, nullptr);
         if (buttons & SDL_BUTTON_LMASK) press(kA);
         if (buttons & SDL_BUTTON_RMASK) press(kB);
@@ -207,7 +218,9 @@ const RecompRuntimeUiItem kItems[] = {
      "The original bindings (arrows, X, Z, ...) keep working.",
      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
     {kKeyMouse, "Controls", "Mouse buttons",
-     "Left click: attack / accelerate. Right click: sprint / reverse.",
+     "In the city: left click attacks / accelerates, right click sprints / reverses. "
+     "In the game's menus: point at an entry to select it, left click to choose it, "
+     "right click to go back; elsewhere a click continues.",
      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
     {kKeyFilter, "Graphics", "Scaling filter (next launch)",
      "How the picture is scaled up. Sharp pixels is the raw look, Smooth blurs, "

@@ -34,7 +34,7 @@ gbarecomp_add_runtime_target(GTAAdvanceRecomp
     DEFAULT_GAME_CONFIG_PATH "game.toml"
 )
 target_sources(GTAAdvanceRecomp PRIVATE src/main.cpp src/pc_controls.cpp
-    src/scene_host.cpp src/scene/scene.cpp)
+    src/scene_host.cpp src/scene/scene.cpp src/menu_mouse.cpp)
 target_include_directories(GTAAdvanceRecomp PRIVATE
     "${RECOMP_UI_ROOT}/src" ${SDL2_INCLUDE_DIR})
 # The runtime archives reference each other; GNU ld needs them grouped.
