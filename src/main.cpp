@@ -7,6 +7,7 @@
 #include "menu_mouse.h"
 #include "scene_host.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -21,6 +22,24 @@ static bool ground_layer_is_affine(int bg, int) { return bg == 2; }
 static int debug_tcp_command(const char* request,
                              void (*write)(void* ctx, const char* data, std::size_t len),
                              void* write_ctx) {
+    // {"cmd":"gta_keys","buttons":4,"frames":1} / {"cmd":"gta_cycle","dir":1}
+    auto number = [&](const char* key, long fallback) {
+        const char* at = std::strstr(request, key);
+        at = at ? std::strchr(at + std::strlen(key), ':') : nullptr;
+        return at ? std::strtol(at + 1, nullptr, 0) : fallback;
+    };
+    static const char kOk[] = "{\"ok\":true}";
+    if (std::strstr(request, "\"gta_keys\"")) {
+        gta_pc_controls_debug_buttons(static_cast<int>(number("\"buttons\"", 0)),
+                                      static_cast<int>(number("\"frames\"", 1)));
+        write(write_ctx, kOk, sizeof(kOk) - 1);
+        return 1;
+    }
+    if (std::strstr(request, "\"gta_cycle\"")) {
+        gta_pc_controls_debug_cycle(static_cast<int>(number("\"dir\"", 1)));
+        write(write_ctx, kOk, sizeof(kOk) - 1);
+        return 1;
+    }
     return gta_menu_tcp_command(request, write, write_ctx) ||
            gta_debug_tcp_command(request, write, write_ctx);
 }

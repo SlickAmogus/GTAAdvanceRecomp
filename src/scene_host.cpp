@@ -187,6 +187,9 @@ double g_play_rate = 0.25;          // ticks per display frame
 const Tick& tick_at(int n) { return g_ticks[n % kTickRing]; }
 int newest_tick() { return g_tick_count - 1; }
 
+constexpr unsigned kCityCpuShift = 3;
+bool active_city() { gba::GbaBus* b = gbarecomp::active_bus(); return b && city_view(b); }
+
 int flip_hook(std::uint32_t, int, ArmCpuState*) {
     gba::GbaBus* bus = gbarecomp::active_bus();
     if (!bus || !city_view(bus)) { g_tick_count = 0; return 0; }
@@ -205,6 +208,13 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo*) {
     if (g_scene_registered && g_flip_registered) gba_mod_set_function_hook_enabled(kSceneHookId, 1);
     ++g_instance_age;
     ++g_display_frame;
+    // A world tick costs the console's CPU three to five display frames, so
+    // ticks reach the screen 2 to 6 frames apart and busy streets run slow.
+    // In the city the game's CPU time is charged at one eighth: every tick
+    // then fits and they arrive exactly four frames apart (the game's own
+    // limit still holds it to 15 a second). Menus and cutscenes keep exact
+    // timing.
+    g_runtime_cycle_discount_shift = active_city() ? kCityCpuShift : 0u;
     if (g_flip_pending) {
         // The picture flip ran during the vertical blank just before this
         // frame: hardware OAM now holds the sprites of the latched tick.
