@@ -18,3 +18,4 @@ recomp_scan.toml
 gta_pc.ini
 __pycache__/
 *.zip
+recomp_coverage_*.json
