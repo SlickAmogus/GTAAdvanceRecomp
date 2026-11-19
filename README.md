@@ -88,6 +88,12 @@ are drawn on the PC straight from the game's world data:
   second. The renderer shows the steps in between, so scrolling, people and
   traffic move continuously; the picture is then about 1/12 s behind the
   game. Turn it off for the original stepping.
+- **Show player under cover** (on by default): the original hides you
+  completely under bridges, gates and awnings. Here you, and the car you are
+  in, are drawn see-through over whatever covers you.
+- **Frame rate**: 60 by default. 120 / 180 / 240 and "Match display" draw the
+  in-between states more often, but this is experimental: in a first test at
+  3440x1440 it reached 90 to 104 pictures a second with hitches.
 - **Render resolution** trades sharpness for speed or a chunkier look.
 
 People, cars and the HUD are the game's own sprites, scaled up. The game's own
@@ -111,6 +117,10 @@ original picture.
 
 The original bindings (arrows, X = A, Z = B, ...) keep working.
 
+The game reads the pad only 15 times a second, so every key of this layout
+is held until the game has seen it: a quick tap is never lost, and Q / E play
+the whole "hold Select, press L or R" weapon chord in the right order.
+
 **Mouse in the game's menus** (main menu, pause menu, save slots): point at
 an entry to select it, left click to choose it, right click to go back. On
 screens without a list (dialogue, title) a left click continues. The pointer
@@ -129,7 +139,7 @@ is hidden while you are in the city.
 | `recomp.toml` | Hand-written recompiler config (entry points, RAM-copied routines) |
 | `tools/scan_seeds.py` | Finds pointer-table functions and computed-jump landings |
 | `tools/drive.py` | Headless, muted test driver over the debug server |
-| `tools/re/` | Reverse-engineering and test tools (Ghidra scripts, native-vs-game shots, smoothness and menu checks) |
+| `tools/re/` | Reverse-engineering and test tools (Ghidra scripts, native-vs-game shots, smoothness, menu and input checks) |
 | `patches/` | Fixes to apply to the gbarecomp checkout |
 
 ## Licensing

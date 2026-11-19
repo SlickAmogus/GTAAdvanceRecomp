@@ -342,8 +342,12 @@ SpritePos table_pos(std::uint16_t a0, std::uint16_t a1, bool world) {
     return {static_cast<float>(sx), static_cast<float>(sy)};
 }
 
+//
+// With `only`, just the marked sprites are drawn, blended over the picture at
+// `ghost` sixteenths (the player shown through whatever covers them).
 void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt, int prio_lo, int prio_hi,
-                  const std::uint8_t* oam, float world_shift, const SpritePos* world_pos) {
+                  const std::uint8_t* oam, float world_shift, const SpritePos* world_pos,
+                  const bool* only = nullptr, unsigned ghost = 0) {
     if (!(dispcnt & 0x1000)) return;
     const std::uint8_t* vram = bus->vram_ptr() + 0x10000;
     const std::uint8_t* pal = bus->pal_ptr() + 0x200;
@@ -354,6 +358,7 @@ void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt, int 
         for (int i = 127; i >= 0; --i) {
             const std::uint16_t a0 = rd16(oam + i * 8), a1 = rd16(oam + i * 8 + 2), a2 = rd16(oam + i * 8 + 4);
             if (((a2 >> 10) & 3) != pass || !sprite_shown(a0)) continue;
+            if (only && !only[i]) continue;
             const bool affine = a0 & 0x100;
             const int mode = (a0 >> 10) & 3;
             int w, h, bw, bh;
@@ -430,7 +435,8 @@ void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt, int 
                         index = (tx & 1) ? b >> 4 : b & 15;
                     }
                     if (!index) continue;
-                    row[x] = mode == 1 ? blend(lut[index], row[x], eva, evb) : lut[index];
+                    if (ghost) row[x] = blend(lut[index], row[x], ghost, 16 - ghost);
+                    else row[x] = mode == 1 ? blend(lut[index], row[x], eva, evb) : lut[index];
                 }
             }
         }
@@ -632,6 +638,75 @@ bool interpolate_ticks(const Tick& a, const Tick& b, float f, gtascene::View* vi
     return true;
 }
 
+// The player under cover. The game's sprites always sit beneath its building
+// layer, so walking or driving under a bridge, a gate or an awning hides the
+// player completely. The native picture draws the player's sprites a second
+// time, see-through, over the buildings.
+//
+// Which sprites are the player's is not read from the game: the camera
+// follows the player, so theirs are the world sprites that stay put on
+// screen while the ground scrolls. The spot is remembered while standing
+// still, and every world sprite covering it counts (the player, or the car
+// they are in).
+float g_focus_x = 120.0f, g_focus_y = 88.0f;    // 240-column space
+bool g_focus_known = false;
+
+void track_player(const Tick& a, const Tick& b) {
+    const float pixels_per_unit = 118.0f / b.ground_z;
+    const float scroll_x = (b.cam_x - a.cam_x) * pixels_per_unit, scroll_y = (b.cam_y - a.cam_y) * pixels_per_unit;
+    if (std::max(std::fabs(scroll_x), std::fabs(scroll_y)) < 5.0f) return;      // nothing to tell apart
+    // Middle of each world sprite's bounds. The player's picture changes
+    // shape from one animation frame to the next, but its middle stays put.
+    auto centres = [](const Tick& t, float (*out)[2]) {
+        int n = 0;
+        for (int i = 0; i < 128; ++i) {
+            const std::uint16_t a0 = rd16(t.oam + i * 8), a1 = rd16(t.oam + i * 8 + 2), a2 = rd16(t.oam + i * 8 + 4);
+            if (((a2 >> 10) & 3) == 0 || !sprite_shown(a0)) continue;
+            int w, h, bw, bh;
+            sprite_size(a0, a1, &w, &h, &bw, &bh);
+            const SpritePos at = table_pos(a0, a1, true);
+            out[n][0] = at.x - t.shift + bw * 0.5f; out[n][1] = at.y + bh * 0.5f;
+            ++n;
+        }
+        return n;
+    };
+    static float was[128][2], now[128][2];
+    const int was_count = centres(a, was), now_count = centres(b, now);
+    float best = 1e9f, bx = 0, by = 0;
+    for (int i = 0; i < now_count; ++i) {
+        bool stayed = false;
+        for (int j = 0; j < was_count && !stayed; ++j)
+            stayed = std::fabs(was[j][0] - now[i][0]) <= 4.0f && std::fabs(was[j][1] - now[i][1]) <= 4.0f;
+        if (!stayed) continue;
+        // Prefer the one nearest where the player was (or the middle of the
+        // screen the first time).
+        const float d = std::fabs(now[i][0] - g_focus_x) + std::fabs(now[i][1] - g_focus_y);
+        if (d < best) { best = d; bx = now[i][0]; by = now[i][1]; }
+    }
+    if (best < (g_focus_known ? 48.0f : 80.0f)) { g_focus_x = bx; g_focus_y = by; g_focus_known = true; }
+}
+
+// Marks the world sprites of `oam` that cover the player's spot.
+bool mark_player(const std::uint8_t* oam, float shift, bool* marked) {
+    bool any = false;
+    for (int i = 0; i < 128; ++i) {
+        marked[i] = false;
+        const std::uint16_t a0 = rd16(oam + i * 8), a1 = rd16(oam + i * 8 + 2), a2 = rd16(oam + i * 8 + 4);
+        if (((a2 >> 10) & 3) == 0 || !sprite_shown(a0)) continue;
+        int w, h, bw, bh;
+        sprite_size(a0, a1, &w, &h, &bw, &bh);
+        SpritePos at = table_pos(a0, a1, true);
+        at.x -= shift;
+        // The picture sits in the middle of the bounds (double-size sprites
+        // have a wide empty border).
+        const float mx = (bw - w) * 0.5f + 2.0f, my = (bh - h) * 0.5f + 2.0f;
+        if (g_focus_x < at.x + mx || g_focus_x >= at.x + bw - mx) continue;
+        if (g_focus_y < at.y + my || g_focus_y >= at.y + bh - my) continue;
+        marked[i] = any = true;
+    }
+    return any;
+}
+
 // Builds the composite into g_frame. False when the game is not showing the
 // city right now (menus, cutscenes, loading).
 bool compose(int out_w, int out_h, float phase) {
@@ -698,6 +773,12 @@ bool compose(int out_w, int out_h, float phase) {
     l.row_begin = 0; l.row_end = out_h;
 
     g_shown_cam[0] = view.cam_x; g_shown_cam[1] = view.cam_y;
+    static bool player[128];
+    bool show_player = false;
+    if (g_settings.show_player && g_tick_count >= 2 && world_oam != bus->oam_ptr()) {
+        track_player(tick_at(newest_tick() - 1), tick_at(newest_tick()));
+        show_player = g_focus_known && mark_player(world_oam, world_shift, player);
+    }
     static BandPool pool;
     const std::uint16_t bldcnt = bus->io().read16(0x050), bldy = bus->io().read16(0x054);
     const int bands = std::min(pool.bands(), std::max(1, out_h / 48));
@@ -712,6 +793,7 @@ bool compose(int out_w, int out_h, float phase) {
         draw_objects(rows, bus, dispcnt, 3, 3, world_oam, world_shift, world_pos);
         gtascene::draw_buildings(mem, band, g_instances, g_instance_count, g_frame.data(), g_depth.data());
         draw_objects(rows, bus, dispcnt, 1, 2, world_oam, world_shift, world_pos);
+        if (show_player) draw_objects(rows, bus, dispcnt, 1, 3, world_oam, world_shift, world_pos, player, 9);
         if (dispcnt & 0x0200) draw_text_bg(rows, bus, 1);
         draw_objects(rows, bus, dispcnt, 0, 0, bus->oam_ptr(), 0.0f, nullptr);
         apply_fade(rows, bldcnt, bldy);
@@ -815,8 +897,9 @@ int gta_debug_tcp_command(const char* request,
     const bool ok = drawn && gta_scene_debug_shot("scene_shot.ppm", static_cast<int>(w), static_cast<int>(h));
     char reply[280];
     if (ok) std::snprintf(reply, sizeof(reply),
-                          "{\"ok\":true,\"ticks\":%d,\"frame\":%u,\"cam_x\":%.3f,\"cam_y\":%.3f,\"ms\":%.2f}",
-                          g_tick_count, g_display_frame, static_cast<double>(g_shown_cam[0]),
+                          "{\"ok\":true,\"ticks\":%d,\"frame\":%u,\"player\":[%d,%.1f,%.1f],\"cam_x\":%.3f,\"cam_y\":%.3f,\"ms\":%.2f}",
+                          g_tick_count, g_display_frame, g_focus_known ? 1 : 0,
+                          static_cast<double>(g_focus_x), static_cast<double>(g_focus_y), static_cast<double>(g_shown_cam[0]),
                           static_cast<double>(g_shown_cam[1]), ms);
     else std::snprintf(reply, sizeof(reply), "{\"ok\":false,\"error\":\"not in the city view\"}");
     write(write_ctx, reply, std::strlen(reply));

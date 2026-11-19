@@ -101,6 +101,39 @@ The building instance list is re-sorted and relinked inside `0x0800D2B0`
 between flips the list is often incomplete. `0x0800E3E4` is the first call
 after the sort; the renderer copies the list there.
 
+### Pacing on the PC
+
+A tick costs the console's CPU three to five display frames, so on hardware
+flips land 2 to 6 frames apart and busy streets run slow. The port charges
+the city's CPU time at one eighth (the runtime's cycle discount): every tick
+fits, and flips land exactly four frames apart.
+
+### Pad
+
+The pad is read once per tick. `IWRAM 0x03000098` = buttons newly pressed on
+that read, `0x0300009C` = buttons held, both in KEYINPUT bit order with 1 =
+down. A press shorter than a tick can be missed entirely, and the parts of a
+chord must all be down on the same read. `EWRAM 0x02010C7A` selects the
+control scheme (0 = the default described under Controls).
+
+## Static objects
+
+The city is divided into 16x16 sectors of 1024 world units. The sector table
+is at `EWRAM 0x02015650`: from `+0x24`, twelve bytes per sector (`count`,
+pointer to records, runtime list), sixteen sectors per row; columns and rows
+at `+0xC28` / `+0xC24`. Each record is sixteen bytes:
+
+| Offset | Meaning |
+|---|---|
+| `+0` | index within the sector |
+| `+4, +6` | u16 x, y of the object's corner (the instance sits at its middle) |
+| `+8` | u16 type: `>= 0x80` is building model `type - 0x80`, `0x40..0x7F` is prop model `type + 266` |
+| `+10` | low two bits = quarter turns |
+
+`0x0800C8B4` turns a sector's records into instances as the camera nears it.
+The model table is at `0x08EBF7F4`, sixteen bytes per model (id, geometry
+pointer, two animation lists).
+
 ## Ground
 
 World units to ground texels: multiply by `0x28 / 64 = 0.625`. One tile is 8
