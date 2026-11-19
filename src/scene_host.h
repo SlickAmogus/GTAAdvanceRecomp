@@ -9,6 +9,7 @@ struct GtaSceneSettings {
     int native = 1;          // 0 = the game's own 240x160 picture
     int resolution = 0;      // 0 = window resolution, then 75 / 50 / 33 / 25 %
     int smooth = 1;          // blend between the game's 15 world ticks a second
+    int frame_rate = 1;      // presents per game frame: 0 = match the display, 1..4 = 60..240 fps (above 60 is experimental)
 };
 GtaSceneSettings* gta_scene_settings();
 

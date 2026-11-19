@@ -17,9 +17,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <condition_variable>
 #include <cstring>
+#include <functional>
+#include <mutex>
 #include <thread>
 #include <vector>
+
+#include <SDL.h>
 
 #include "gba_bus.h"
 #include "gba_io.h"
@@ -246,7 +251,6 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo*) {
 }
 std::vector<std::uint32_t> g_frame;
 std::vector<float> g_depth;
-double g_phase_ms[4];   // ground, world sprites, buildings, HUD (debug timing)
 float g_shown_cam[2];   // camera of the last composite (debug)
 
 std::uint16_t rd16(const std::uint8_t* p) {
@@ -257,6 +261,7 @@ struct Layout {
     int w = 0, h = 0;
     float scale = 1.0f;     // output pixels per GBA pixel
     float box_x = 0;        // left edge of the centred 240-wide area
+    int row_begin = 0, row_end = 0;     // output rows this thread may write
 };
 
 std::uint32_t colour(std::uint16_t c) {
@@ -285,7 +290,7 @@ float anchor_x(const Layout& l, Anchor a) {
 
 void fill(const Layout& l, float x0, float y0, float x1, float y1, std::uint32_t c) {
     const int ax = std::max(0, static_cast<int>(x0 + 0.5f)), bx = std::min(l.w, static_cast<int>(x1 + 0.5f));
-    const int ay = std::max(0, static_cast<int>(y0 + 0.5f)), by = std::min(l.h, static_cast<int>(y1 + 0.5f));
+    const int ay = std::max(l.row_begin, static_cast<int>(y0 + 0.5f)), by = std::min(l.row_end, static_cast<int>(y1 + 0.5f));
     if (bx <= ax) return;
     for (int y = ay; y < by; ++y) {
         std::uint32_t* row = g_frame.data() + static_cast<std::size_t>(y) * l.w;
@@ -388,8 +393,9 @@ void draw_objects(const Layout& l, gba::GbaBus* bus, std::uint16_t dispcnt, int 
             }
             const int x_begin = std::max(0, static_cast<int>(std::floor(ox + (sx + bx0) * l.scale)));
             const int x_end = std::min(l.w, static_cast<int>(std::ceil(ox + (sx + bx1) * l.scale)));
-            const int y_begin = std::max(0, static_cast<int>(std::floor((sy + by0) * l.scale)));
-            const int y_end = std::min(l.h, static_cast<int>(std::ceil((sy + by1) * l.scale)));
+            const int y_begin = std::max(l.row_begin, static_cast<int>(std::floor((sy + by0) * l.scale)));
+            const int y_end = std::min(l.row_end, static_cast<int>(std::ceil((sy + by1) * l.scale)));
+            if (y_begin >= y_end || x_begin >= x_end) continue;
             std::uint32_t lut[256];
             const int colours = bpp8 ? 256 : 16;
             for (int c = 1; c < colours; ++c) lut[c] = colour(rd16(pal + (palbank + c) * 2));
@@ -462,6 +468,7 @@ void draw_text_bg(const Layout& l, gba::GbaBus* bus, int bg) {
         return index ? (e >> 12) * 16 + index : 0;
     };
     for (int band = 0; band < 160; band += 8) {
+        if ((band + 8) * l.scale <= l.row_begin || band * l.scale >= l.row_end) continue;
         // Occupied 8-pixel columns of this band, then runs separated by gaps
         // of three or more empty columns.
         bool used[30] = {};
@@ -494,13 +501,15 @@ void draw_text_bg(const Layout& l, gba::GbaBus* bus, int bg) {
 }
 
 // Brightness fades done with the blend registers (mission start/end, deaths).
-void apply_fade(std::uint16_t bldcnt, std::uint16_t bldy) {
+void apply_fade(const Layout& l, std::uint16_t bldcnt, std::uint16_t bldy) {
     const int mode = (bldcnt >> 6) & 3;
     if (mode < 2 || !(bldcnt & 0x3F)) return;
     const std::uint32_t k = std::min<std::uint32_t>(bldy & 31, 16);
     if (!k) return;
-    for (std::uint32_t& px : g_frame) {
-        std::uint32_t rb = px & 0xFF00FF, g = px & 0x00FF00;
+    std::uint32_t* px = g_frame.data() + static_cast<std::size_t>(l.row_begin) * l.w;
+    std::uint32_t* const end = g_frame.data() + static_cast<std::size_t>(l.row_end) * l.w;
+    for (; px < end; ++px) {
+        std::uint32_t rb = *px & 0xFF00FF, g = *px & 0x00FF00;
         if (mode == 2) {
             rb += (((0xFF00FF - rb) * k) >> 4) & 0xFF00FF;
             g += (((0x00FF00 - g) * k) >> 4) & 0x00FF00;
@@ -508,27 +517,64 @@ void apply_fade(std::uint16_t bldcnt, std::uint16_t bldy) {
             rb -= ((rb * k) >> 4) & 0xFF00FF;
             g -= ((g * k) >> 4) & 0x00FF00;
         }
-        px = 0xFF000000u | rb | g;
+        *px = 0xFF000000u | rb | g;
     }
 }
 
-// Runs `draw` over the frame split into horizontal bands, one per thread.
-// The bands are disjoint, so the workers never touch the same pixels.
-template <typename Draw>
-void in_bands(const gtascene::View& view, Draw draw) {
-    static const int workers = std::clamp(static_cast<int>(std::thread::hardware_concurrency()) - 1, 1, 8);
-    const int bands = std::min(workers, std::max(1, view.height / 64));
-    std::vector<std::thread> threads;
-    threads.reserve(bands);
-    for (int i = 0; i < bands; ++i) {
-        gtascene::View band = view;
-        band.row_begin = view.height * i / bands;
-        band.row_end = view.height * (i + 1) / bands;
-        if (i + 1 < bands) threads.emplace_back([band, &draw] { draw(band); });
-        else draw(band);                        // last band on this thread
+// Worker threads that draw the picture in horizontal bands. The bands are
+// disjoint rows, so the workers never touch the same pixels. The threads are
+// kept between frames: starting a dozen of them for every present costs more
+// than a millisecond.
+class BandPool {
+public:
+    BandPool() {
+        const int cores = static_cast<int>(std::thread::hardware_concurrency());
+        const int helpers = std::clamp(cores - 2, 0, 15);
+        for (int i = 0; i < helpers; ++i) threads_.emplace_back([this, i] { work(i); });
     }
-    for (std::thread& t : threads) t.join();
-}
+    ~BandPool() {
+        { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; ++generation_; }
+        wake_.notify_all();
+        for (std::thread& t : threads_) t.join();
+    }
+    int bands() const { return static_cast<int>(threads_.size()) + 1; }
+    // Calls job(band) for every band index, one of them on this thread.
+    void run(const std::function<void(int)>& job) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            job_ = &job; pending_ = static_cast<int>(threads_.size()); ++generation_;
+        }
+        wake_.notify_all();
+        job(static_cast<int>(threads_.size()));
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_.wait(lock, [this] { return pending_ == 0; });
+        job_ = nullptr;
+    }
+private:
+    void work(int index) {
+        unsigned seen = 0;
+        for (;;) {
+            const std::function<void(int)>* job;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                wake_.wait(lock, [&] { return generation_ != seen; });
+                seen = generation_;
+                if (stop_) return;
+                job = job_;
+            }
+            (*job)(index);
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (--pending_ == 0) done_.notify_one();
+        }
+    }
+    std::vector<std::thread> threads_;
+    std::mutex mutex_;
+    std::condition_variable wake_, done_;
+    const std::function<void(int)>* job_ = nullptr;
+    unsigned generation_ = 0;
+    int pending_ = 0;
+    bool stop_ = false;
+};
 
 // Fills `view` and `positions` with the state a fraction `f` of the way from
 // tick `a` to tick `b`. False when the two ticks should not be blended (the
@@ -588,7 +634,7 @@ bool interpolate_ticks(const Tick& a, const Tick& b, float f, gtascene::View* vi
 
 // Builds the composite into g_frame. False when the game is not showing the
 // city right now (menus, cutscenes, loading).
-bool compose(int out_w, int out_h) {
+bool compose(int out_w, int out_h, float phase) {
     gba::GbaBus* bus = gbarecomp::active_bus();
     if (!g_settings.native || !bus || out_w < 64 || out_h < 48) return false;
     const std::uint16_t dispcnt = bus->io().read16(0x000);
@@ -610,10 +656,14 @@ bool compose(int out_w, int out_h) {
         const int newest = newest_tick();
         int shown = newest;                         // tick whose sprites are drawn
         float f = 1.0f;
-        const int from = static_cast<int>(g_play);
+        // Playback position of this present: the frame's own, plus however
+        // far into the frame's time slot it is being shown.
+        const double play = std::min(g_play + g_play_rate * std::clamp(phase, 0.0f, 1.0f),
+                                     static_cast<double>(newest));
+        const int from = static_cast<int>(play);
         if (g_settings.smooth && from < newest && newest - from < kTickRing - 1) {
             shown = from + 1;
-            f = static_cast<float>(g_play - from);
+            f = static_cast<float>(play - from);
         }
         const Tick& cur = tick_at(shown);
         view.cam_x = cur.cam_x; view.cam_y = cur.cam_y; view.cam_z = cur.cam_z; view.ground_z = cur.ground_z;
@@ -645,29 +695,43 @@ bool compose(int out_w, int out_h) {
     l.w = out_w; l.h = out_h;
     l.scale = out_h / 160.0f;
     l.box_x = (out_w - 240.0f * l.scale) * 0.5f;
+    l.row_begin = 0; l.row_end = out_h;
 
-    using Clock = std::chrono::steady_clock;
-    auto mark = Clock::now();
-    auto lap = [&](int i) {
-        const auto now = Clock::now();
-        g_phase_ms[i] = std::chrono::duration<double, std::milli>(now - mark).count();
-        mark = now;
-    };
     g_shown_cam[0] = view.cam_x; g_shown_cam[1] = view.cam_y;
-    in_bands(view, [&](const gtascene::View& band) { gtascene::draw_ground(mem, band, g_frame.data()); });
-    lap(0);
-    draw_objects(l, bus, dispcnt, 3, 3, world_oam, world_shift, world_pos);
-    lap(1);
-    in_bands(view, [&](const gtascene::View& band) {
+    static BandPool pool;
+    const std::uint16_t bldcnt = bus->io().read16(0x050), bldy = bus->io().read16(0x054);
+    const int bands = std::min(pool.bands(), std::max(1, out_h / 48));
+    pool.run([&](int index) {
+        if (index >= bands) return;
+        gtascene::View band = view;
+        band.row_begin = out_h * index / bands;
+        band.row_end = out_h * (index + 1) / bands;
+        Layout rows = l;
+        rows.row_begin = band.row_begin; rows.row_end = band.row_end;
+        gtascene::draw_ground(mem, band, g_frame.data());
+        draw_objects(rows, bus, dispcnt, 3, 3, world_oam, world_shift, world_pos);
         gtascene::draw_buildings(mem, band, g_instances, g_instance_count, g_frame.data(), g_depth.data());
+        draw_objects(rows, bus, dispcnt, 1, 2, world_oam, world_shift, world_pos);
+        if (dispcnt & 0x0200) draw_text_bg(rows, bus, 1);
+        draw_objects(rows, bus, dispcnt, 0, 0, bus->oam_ptr(), 0.0f, nullptr);
+        apply_fade(rows, bldcnt, bldy);
     });
-    lap(2);
-    draw_objects(l, bus, dispcnt, 1, 2, world_oam, world_shift, world_pos);
-    if (dispcnt & 0x0200) draw_text_bg(l, bus, 1);
-    draw_objects(l, bus, dispcnt, 0, 0, bus->oam_ptr(), 0.0f, nullptr);
-    apply_fade(bus->io().read16(0x050), bus->io().read16(0x054));
-    lap(3);
     return true;
+}
+
+// Presents per guest frame: the display's refresh rate over the game's 59.7
+// Hz, or the player's choice. Only worth anything while motion is blended.
+int present_subframes() {
+    if (!g_settings.native || !g_settings.smooth) return 1;
+    if (g_settings.frame_rate > 0) return std::clamp(g_settings.frame_rate, 1, 4);
+    static int automatic = 0;
+    if (!automatic) {
+        automatic = 1;
+        SDL_DisplayMode mode;
+        if (SDL_WasInit(SDL_INIT_VIDEO) && SDL_GetCurrentDisplayMode(0, &mode) == 0 && mode.refresh_rate > 0)
+            automatic = std::clamp((mode.refresh_rate + 20) / 60, 1, 4);
+    }
+    return automatic;
 }
 
 int present_frame(gbarecomp::RunOptions::PresentFrame* frame) {
@@ -678,7 +742,16 @@ int present_frame(gbarecomp::RunOptions::PresentFrame* frame) {
     const int h = std::max(160, frame->drawable_height * pct / 100);
     w = std::max(w, h * 3 / 2);
     g_wide_factor.store(std::max(1.0f, (w * 160.0f) / (h * 240.0f)), std::memory_order_relaxed);
-    if (!compose(w, h)) return 0;
+    if (!compose(w, h, frame->phase)) return 0;
+    // Once a second or so, how many pictures a second are really going out.
+    static unsigned presents = 0, last_frame = 0;
+    ++presents;
+    if (g_display_frame - last_frame >= 300) {
+        std::fprintf(stderr, "gta: native presents %.1f per game frame (%.0f a second)\n",
+                     presents / static_cast<double>(g_display_frame - last_frame),
+                     presents * 59.7275 / (g_display_frame - last_frame));
+        presents = 0; last_frame = g_display_frame;
+    }
     frame->argb = g_frame.data();
     frame->width = static_cast<unsigned>(w);
     frame->height = static_cast<unsigned>(h);
@@ -700,11 +773,12 @@ GtaSceneSettings* gta_scene_settings() { return &g_settings; }
 
 void gta_scene_install(gbarecomp::RunOptions* opts) {
     opts->present_frame = present_frame;
+    opts->present_subframes = present_subframes;
     opts->extended_view_frame = frame_start;
 }
 
 bool gta_scene_debug_shot(const char* path, int width, int height) {
-    if (!compose(width, height)) return false;
+    if (!compose(width, height, 0.0f)) return false;
     std::FILE* f = std::fopen(path, "wb");
     if (!f) return false;
     std::fprintf(f, "P6\n%d %d\n255\n", width, height);
@@ -734,14 +808,16 @@ int gta_debug_tcp_command(const char* request,
     g_wide_factor.store(std::max(1.0f, (w * 160.0f) / (h * 240.0f)), std::memory_order_relaxed);
     // Time the composite alone, then write the picture.
     const auto t0 = std::chrono::steady_clock::now();
-    const bool drawn = compose(static_cast<int>(w), static_cast<int>(h));
+    unsigned long long phase_pct = 0;
+    find_uint(request, "\"phase\"", &phase_pct);
+    const bool drawn = compose(static_cast<int>(w), static_cast<int>(h), phase_pct / 100.0f);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     const bool ok = drawn && gta_scene_debug_shot("scene_shot.ppm", static_cast<int>(w), static_cast<int>(h));
     char reply[280];
     if (ok) std::snprintf(reply, sizeof(reply),
-                          "{\"ok\":true,\"ticks\":%d,\"frame\":%u,\"tick_frames\":[%u,%u],\"cam_x\":%.3f,\"cam_y\":%.3f,\"ms\":%.2f,\"ground\":%.2f,\"sprites\":%.2f,\"buildings\":%.2f,\"hud\":%.2f}",
-                          g_tick_count, g_display_frame, g_last_tick_frame, static_cast<unsigned>(g_play * 100),
-                          static_cast<double>(g_shown_cam[0]), static_cast<double>(g_shown_cam[1]), ms, g_phase_ms[0], g_phase_ms[1], g_phase_ms[2], g_phase_ms[3]);
+                          "{\"ok\":true,\"ticks\":%d,\"frame\":%u,\"cam_x\":%.3f,\"cam_y\":%.3f,\"ms\":%.2f}",
+                          g_tick_count, g_display_frame, static_cast<double>(g_shown_cam[0]),
+                          static_cast<double>(g_shown_cam[1]), ms);
     else std::snprintf(reply, sizeof(reply), "{\"ok\":false,\"error\":\"not in the city view\"}");
     write(write_ctx, reply, std::strlen(reply));
     return 1;

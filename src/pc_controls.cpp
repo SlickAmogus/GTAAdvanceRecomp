@@ -37,6 +37,7 @@ constexpr char kKeyFilter[] = "gta.filter";
 constexpr char kKeyNative[] = "gta.native_renderer";
 constexpr char kKeyResolution[] = "gta.resolution";
 constexpr char kKeySmooth[] = "gta.smooth";
+constexpr char kKeyFrameRate[] = "gta.frame_rate";
 
 struct Settings {
     int layout = 1;         // WASD layout on
@@ -71,6 +72,7 @@ void load_settings(const char* argv0) {
         else if (!std::strcmp(key, "native_renderer")) gta_scene_settings()->native = value != 0;
         else if (!std::strcmp(key, "resolution")) gta_scene_settings()->resolution = clamp(value, 0, 4);
         else if (!std::strcmp(key, "smooth_motion")) gta_scene_settings()->smooth = value != 0;
+        else if (!std::strcmp(key, "frame_rate")) gta_scene_settings()->frame_rate = clamp(value, 0, 4);
     }
     std::fclose(f);
 }
@@ -104,10 +106,10 @@ void save_settings() {
     std::FILE* f = std::fopen(g_settings_path.c_str(), "w");
     if (!f) return;
     std::fprintf(f, "pc_layout = %d\nmouse_buttons = %d\nfullscreen = %d\nfilter = %d\n"
-                    "native_renderer = %d\nresolution = %d\nsmooth_motion = %d\n",
+                    "native_renderer = %d\nresolution = %d\nsmooth_motion = %d\nframe_rate = %d\n",
                  g_settings.layout, g_settings.mouse, g_settings.fullscreen, g_settings.filter,
                  gta_scene_settings()->native, gta_scene_settings()->resolution,
-                 gta_scene_settings()->smooth);
+                 gta_scene_settings()->smooth, gta_scene_settings()->frame_rate);
     std::fclose(f);
 }
 
@@ -269,6 +271,7 @@ std::uint16_t input_frame(const gbarecomp::TouchFrameInfo*) {
 // ── settings-menu rows ──────────────────────────────────────────────────────
 const char* const kFilterChoices[] = {"Sharp pixels", "Smooth", "Sharp-bilinear"};
 
+const char* const kFrameRateChoices[] = {"Match display", "60", "120", "180", "240"};
 const char* const kResolutionChoices[] = {"Window (sharpest)", "75%", "50%", "33%", "25% (chunky)"};
 
 const RecompRuntimeUiItem kItems[] = {
@@ -287,6 +290,11 @@ const RecompRuntimeUiItem kItems[] = {
      "move smoothly; the picture is then one step (1/15 s) behind the game. "
      "Turn off for the original stepping.",
      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
+    {kKeyFrameRate, "Graphics", "Frame rate",
+     "How often the city is drawn, as a multiple of the game's 60 frames a second. "
+     "Match display picks the multiple nearest your monitor (120 on a 144 Hz screen). "
+     "Experimental above 60: it does not hold its rate yet and can hitch. Needs Smooth motion.",
+     RECOMP_RUNTIME_UI_CHOICE, 0, 4, 1, kFrameRateChoices, 5, nullptr},
     {kKeyLayout, "Controls", "WASD layout",
      "W/A/S/D move and steer. Left Ctrl or J: attack / accelerate. Left Shift or K: "
      "sprint / reverse. Space: strafe / handbrake. F: enter or exit a car. C: jump / "
@@ -312,6 +320,7 @@ int ui_get(const char* key, int* out) {
     else if (!std::strcmp(key, kKeyNative)) *out = gta_scene_settings()->native;
     else if (!std::strcmp(key, kKeyResolution)) *out = gta_scene_settings()->resolution;
     else if (!std::strcmp(key, kKeySmooth)) *out = gta_scene_settings()->smooth;
+    else if (!std::strcmp(key, kKeyFrameRate)) *out = gta_scene_settings()->frame_rate;
     else return 0;
     return 1;
 }
@@ -323,6 +332,7 @@ int ui_set(const char* key, int value) {
     else if (!std::strcmp(key, kKeyNative)) gta_scene_settings()->native = value != 0;
     else if (!std::strcmp(key, kKeyResolution)) gta_scene_settings()->resolution = clamp(value, 0, 4);
     else if (!std::strcmp(key, kKeySmooth)) gta_scene_settings()->smooth = value != 0;
+    else if (!std::strcmp(key, kKeyFrameRate)) gta_scene_settings()->frame_rate = clamp(value, 0, 4);
     else return 0;
     save_settings();
     return 1;
