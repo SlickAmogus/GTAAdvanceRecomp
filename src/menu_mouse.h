@@ -8,6 +8,13 @@
 // the mouse buttons belong to the menu and not to gameplay.
 bool gta_menu_mouse(std::uint16_t* keys);
 
+// Mouse wheel notches since the last call (positive = away from the user,
+// i.e. up). One consumer per frame: the online menu while it is open, the
+// game's menus otherwise.
+int gta_mouse_wheel_take();
+// Test hook: queue wheel notches as if scrolled.
+void gta_mouse_wheel_inject(int notches);
+
 // Debug TCP: {"cmd":"gta_menu"} describes the detected list;
 // {"cmd":"gta_pointer","x":..,"y":..,"l":1,"r":0} feeds a synthetic pointer
 // (GBA screen pixels; l/r = clicks to queue).

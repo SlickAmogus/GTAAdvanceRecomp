@@ -2,6 +2,7 @@
 
 #include "online/online_match.h"
 #include "online/room_client.h"
+#include "menu_mouse.h"
 
 #include "runtime.h"
 #include "gba_bus.h"
@@ -200,11 +201,20 @@ struct Ui {
     std::uint32_t match = 0, peer = 0;
     std::uint64_t start_sent_ms = 0, settings_sent_ms = 0, start_deadline = 0;
     bool acked = false;
-    // mouse hit boxes from the last draw (virtual pixels)
-    struct Hit { int y0, y1, item; };
+    // chat typed before the connection was up, sent once it is
+    std::vector<std::pair<std::string, bool>> pending_say;
+    // After the menu closes the keys stay away from the game until every
+    // key and mouse button is up, so the press that closed it does not land.
+    bool draining = false;
+    // Just opened: the press that opened it is still down; wait it out.
+    bool settling = false;
+    // mouse hit boxes from the last draw (virtual pixels); item >= 0 is a
+    // row, the negative ones are the buttons below
+    struct Hit { int x0, y0, x1, y1, item; };
     std::vector<Hit> hits;
-    int canvas_scale = 1, image_w = 0, image_h = 0;
+    int canvas_scale = 1, image_w = 0, image_h = 0, mouse_vx = -1, mouse_vy = -1;
 };
+enum HitItem { kHitOk = -10, kHitCancel = -11, kHitChat = -12 };
 Ui g_ui;
 std::vector<std::uint32_t> g_image;
 
@@ -216,17 +226,23 @@ void show_message(const std::string& text, Screen back) {
     g_ui.screen = Screen::Message;
 }
 
+void ensure_client();
+
 void open_menu() {
     if (gba::GbaBus* bus = gbarecomp::active_bus()) { g_rom = bus->rom_ptr(); g_rom_size = bus->rom_size(); }
     load_modes();
     if (g_modes.size() != 4) return;
     g_ui.screen = Screen::Main;
     g_ui.cursor = 0;
+    g_ui.pending_say.clear();
+    g_ui.settling = true;
+    ensure_client();                   // on the server by the time anything is picked
 }
 
 void close_menu() {
     if (g_ui.client) { g_ui.client->disconnect(); g_ui.client.reset(); }
     g_ui.screen = Screen::Closed;
+    g_ui.draining = true;
 }
 
 void ensure_client() {
@@ -484,6 +500,8 @@ void pump_network() {
         return;
     }
     if (c.state() != RoomClient::State::Connected) return;
+    for (const auto& [text, room] : g_ui.pending_say) c.say(text, room && c.room() != 0);
+    g_ui.pending_say.clear();
     if (g_ui.list_wanted) { c.request_list(); g_ui.list_wanted = false; }
     if (g_ui.want_host) { c.create_room(2); g_ui.want_host = false; }
     if (g_ui.want_join) { c.join_room(g_ui.want_join); g_ui.want_join = 0; }
@@ -571,32 +589,57 @@ Keys read_keys() {
     return k;
 }
 
-// Mouse: hover selects, left click chooses, right click goes back.
-void read_mouse(int* hover_item, bool* click, bool* right) {
-    *hover_item = -1; *click = *right = false;
-    if (!SDL_WasInit(SDL_INIT_VIDEO)) return;
-    SDL_Window* w = SDL_GetMouseFocus();
-    if (!w || !g_ui.image_w) return;
-    int mx = 0, my = 0, ww = 0, wh = 0;
-    const Uint32 buttons = SDL_GetMouseState(&mx, &my);
-    SDL_GetWindowSize(w, &ww, &wh);
-    static Uint32 prev = 0;
+// Mouse: hover selects, left click chooses (on a setting: the left half
+// lowers it, the right half raises it), right click goes back, the wheel
+// moves through the list (or changes the setting under the pointer).
+struct Mouse { bool moved = false, click = false, right = false; int item = kNoHit, wheel = 0; static constexpr int kNoHit = -1000; };
+// Debug server input (headless tests): a pointer in virtual pixels.
+int g_test_mx = -1, g_test_my = -1, g_test_click = 0, g_test_right = 0;
+Mouse read_mouse() {
+    Mouse m;
+    m.wheel = std::clamp(gta_mouse_wheel_take(), -3, 3);
     static int last_x = -1, last_y = -1;
-    *click = (buttons & SDL_BUTTON_LMASK) && !(prev & SDL_BUTTON_LMASK);
-    *right = (buttons & SDL_BUTTON_RMASK) && !(prev & SDL_BUTTON_RMASK);
-    prev = buttons;
-    if (ww <= 0 || wh <= 0) return;
-    const bool moved = mx != last_x || my != last_y;
-    last_x = mx; last_y = my;
-    if (!moved && !*click) return;
-    const int vy = my * g_ui.image_h / wh / g_ui.canvas_scale;
-    for (const auto& h : g_ui.hits) if (vy >= h.y0 && vy < h.y1) *hover_item = h.item;
+    int vx = -1, vy = -1;
+    if (g_test_mx >= 0) {
+        vx = g_test_mx; vy = g_test_my;
+        m.click = g_test_click > 0; m.right = g_test_right > 0;
+        g_test_click = g_test_right = 0;
+    } else {
+        if (!SDL_WasInit(SDL_INIT_VIDEO)) return m;
+        SDL_Window* w = SDL_GetMouseFocus();
+        if (!w || !g_ui.image_w) return m;
+        int mx = 0, my = 0, ww = 0, wh = 0;
+        const Uint32 buttons = SDL_GetMouseState(&mx, &my);
+        SDL_GetWindowSize(w, &ww, &wh);
+        static Uint32 prev = 0;
+        m.click = (buttons & SDL_BUTTON_LMASK) && !(prev & SDL_BUTTON_LMASK);
+        m.right = (buttons & SDL_BUTTON_RMASK) && !(prev & SDL_BUTTON_RMASK);
+        prev = buttons;
+        if (ww <= 0 || wh <= 0) return m;
+        // The menu image is shown across the whole window.
+        vx = mx * g_ui.image_w / ww / g_ui.canvas_scale;
+        vy = my * g_ui.image_h / wh / g_ui.canvas_scale;
+    }
+    m.moved = vx != last_x || vy != last_y;
+    last_x = vx; last_y = vy;
+    g_ui.mouse_vx = vx; g_ui.mouse_vy = vy;
+    for (const auto& h : g_ui.hits)
+        if (vx >= h.x0 && vx < h.x1 && vy >= h.y0 && vy < h.y1) m.item = h.item;
+    return m;
+}
+bool mouse_on_left_half() {
+    return g_ui.mouse_vx >= 0 && g_ui.image_w && g_ui.mouse_vx < g_ui.image_w / g_ui.canvas_scale / 2;
 }
 
 void handle_input() {
-    const Keys k = read_keys();
-    int hover = -1; bool click = false, right = false;
-    read_mouse(&hover, &click, &right);
+    Keys k = read_keys();
+    const Mouse mouse = read_mouse();
+    const bool right = mouse.right;
+    // Clicking the chat lines opens the chat line.
+    if (mouse.click && mouse.item == kHitChat && g_ui.screen != Screen::Chat) {
+        g_ui.edit.clear(); g_ui.back_to = g_ui.screen; g_ui.screen = Screen::Chat;
+        return;
+    }
     switch (g_ui.screen) {
     case Screen::Name: case Screen::Code: case Screen::Chat: {
         const std::size_t max = g_ui.screen == Screen::Name ? 15 : g_ui.screen == Screen::Code ? 4 : 120;
@@ -606,13 +649,15 @@ void handle_input() {
         }
         if (k.erase && !g_ui.edit.empty()) g_ui.edit.pop_back();
         const Screen back = g_ui.screen == Screen::Chat ? g_ui.back_to : Screen::Main;
-        if (k.back || right) { g_ui.screen = back; break; }
-        if (k.enter || click) {
+        if (k.back || right || (mouse.click && mouse.item == kHitCancel)) { g_ui.screen = back; break; }
+        if (k.enter || (mouse.click && mouse.item == kHitOk)) {
             if (g_ui.screen == Screen::Name) {
                 std::string n = g_ui.edit;
                 while (!n.empty() && n.back() == ' ') n.pop_back();
                 if (!n.empty()) { g_name = n; save_ini(); }
-                if (g_ui.client) { g_ui.client->disconnect(); g_ui.client.reset(); }  // the server learns it next time
+                // A new hello carries the new name.
+                if (g_ui.client && !g_ui.client->room()) { g_ui.client->disconnect(); g_ui.client.reset(); }
+                ensure_client();
                 g_ui.screen = Screen::Main;
             } else if (g_ui.screen == Screen::Code) {
                 if (g_ui.edit.size() == 4) {
@@ -624,7 +669,7 @@ void handle_input() {
                     ensure_client();
                     const bool room = g_ui.client->room() != 0;
                     if (g_ui.client->state() == RoomClient::State::Connected) g_ui.client->say(g_ui.edit, room);
-                    else g_ui.client->add_chat("", "(not connected yet)", false);
+                    else g_ui.pending_say.emplace_back(g_ui.edit, room);   // sent once connected
                 }
                 g_ui.edit.clear();
                 g_ui.screen = back;
@@ -633,22 +678,34 @@ void handle_input() {
         break;
     }
     case Screen::Message:
-        if (k.ok || k.back || click || right) g_ui.screen = g_ui.back_to;
+        if (k.ok || k.back || mouse.click || right) g_ui.screen = g_ui.back_to;
         break;
     case Screen::Starting:
         break;
     default: {
         const auto r = rows();
         if (r.empty()) break;
-        if (hover >= 0 && hover < static_cast<int>(r.size())) g_ui.cursor = hover;
-        if (k.up) g_ui.cursor = (g_ui.cursor + static_cast<int>(r.size()) - 1) % static_cast<int>(r.size());
-        if (k.down) g_ui.cursor = (g_ui.cursor + 1) % static_cast<int>(r.size());
-        g_ui.cursor = std::min(g_ui.cursor, static_cast<int>(r.size()) - 1);
+        const int n = static_cast<int>(r.size());
+        const bool on_row = mouse.item >= 0 && mouse.item < n;
+        if (on_row && (mouse.moved || mouse.click)) g_ui.cursor = mouse.item;
+        if (k.up) g_ui.cursor = (g_ui.cursor + n - 1) % n;
+        if (k.down) g_ui.cursor = (g_ui.cursor + 1) % n;
+        g_ui.cursor = std::min(g_ui.cursor, n - 1);
         const Row& row = r[g_ui.cursor];
+        const bool setting = row.item == kModeRow || row.item == kSettingRow;
+        if (mouse.wheel) {
+            // Over a setting the host can change, the wheel turns it;
+            // elsewhere it walks the list (stopping at the ends).
+            if (setting && row.enabled && on_row) change_setting(row, mouse.wheel > 0 ? 1 : -1);
+            else g_ui.cursor = std::clamp(g_ui.cursor - mouse.wheel, 0, n - 1);
+        }
         if (k.left) change_setting(row, -1);
         if (k.right) change_setting(row, 1);
-        if (k.ok || (click && hover == g_ui.cursor)) {
-            if (row.item == kModeRow || row.item == kSettingRow) change_setting(row, 1);
+        if (k.ok) {
+            if (setting) change_setting(row, 1);
+            else choose(row);
+        } else if (mouse.click && on_row && mouse.item == g_ui.cursor) {
+            if (setting) change_setting(row, mouse_on_left_half() ? -1 : 1);
             else choose(row);
         }
         if (k.back || right) {
@@ -690,12 +747,28 @@ void draw(Canvas& cv) {
         draw_centered(cv, y + 10, prompt, 200);
         const bool blink = (SDL_GetTicks() / 400) & 1;
         draw_centered(cv, y + 32, upper(g_ui.edit) + (blink ? "_" : " "), 256, true);
-        draw_centered(cv, y + 60, "ENTER: OK   DELETE: CANCEL", 150);
+        // Buttons: OK (Enter) and CANCEL (Delete or right click).
+        const int by = y + 62, gap = 24;
+        const std::string ok = "OK", cancel = "CANCEL";
+        const int okw = text_width(ok), cw = text_width(cancel);
+        const int ox = (cv.vw() - okw - gap - cw) / 2, cx = ox + okw + gap;
+        const bool over_ok = g_ui.mouse_vy >= by - 3 && g_ui.mouse_vy < by + lh + 3 &&
+                             g_ui.mouse_vx >= ox - 8 && g_ui.mouse_vx < ox + okw + 8;
+        const bool over_cancel = g_ui.mouse_vy >= by - 3 && g_ui.mouse_vy < by + lh + 3 &&
+                                 g_ui.mouse_vx >= cx - 8 && g_ui.mouse_vx < cx + cw + 8;
+        const bool ready = g_ui.screen != Screen::Code || g_ui.edit.size() == 4;
+        cv.shade(ox - 6, by - 3, okw + 12, lh + 6, over_ok ? 40 : 120);
+        cv.shade(cx - 6, by - 3, cw + 12, lh + 6, over_cancel ? 40 : 120);
+        draw_text(cv, ox, by, ok, !ready ? 110 : over_ok ? 256 : 190, over_ok && ready);
+        draw_text(cv, cx, by, cancel, over_cancel ? 256 : 190, over_cancel);
+        g_ui.hits.push_back({ox - 8, by - 3, ox + okw + 8, by + lh + 3, kHitOk});
+        g_ui.hits.push_back({cx - 8, by - 3, cx + cw + 8, by + lh + 3, kHitCancel});
+        draw_centered(cv, by + lh + 10, "ENTER: OK   DELETE OR RIGHT CLICK: CANCEL", 130);
         break;
     }
     case Screen::Message:
         draw_centered(cv, cv.vh() / 2 - 16, g_ui.message, 256, true);
-        draw_centered(cv, cv.vh() / 2 + 8, "PRESS ENTER", 150);
+        draw_centered(cv, cv.vh() / 2 + 8, "CLICK OR PRESS ENTER", 150);
         break;
     case Screen::Starting:
         draw_centered(cv, cv.vh() / 2 - 8, "STARTING THE MATCH...", 256, true);
@@ -716,10 +789,21 @@ void draw(Canvas& cv) {
             std::string text = r[i].text;
             if (sel && (r[i].item == kModeRow || r[i].item == kSettingRow) && r[i].enabled) text = "< " + text + " >";
             draw_centered(cv, y, text, !r[i].enabled ? 110 : sel ? 256 : 165, sel && r[i].enabled);
-            g_ui.hits.push_back({y, y + lh, i});
+            g_ui.hits.push_back({0, y, cv.vw(), y + lh, i});
             y += lh;
         }
-        // Chat: the newest lines.
+        // More rows above or below: a hint that the wheel scrolls.
+        if (g_ui.scroll > 0) draw_text(cv, cv.vw() - 20, 28, "^", 160);
+        if (g_ui.scroll + visible < static_cast<int>(r.size())) draw_text(cv, cv.vw() - 20, y - lh, "v", 160);
+        // Chat: the newest lines (click them to say something).
+        {
+            const int top = cv.vh() - chat_lines * lh - 4;
+            const bool over = g_ui.mouse_vy >= top && g_ui.mouse_vy < cv.vh();
+            cv.shade(0, top, cv.vw(), cv.vh() - top, over ? 150 : 200);
+            g_ui.hits.push_back({0, top, cv.vw(), cv.vh(), kHitChat});
+            if (!g_ui.client || g_ui.client->chat().empty())
+                draw_text(cv, 4, cv.vh() - lh - 2, over ? "CLICK HERE TO CHAT" : "CHAT", over ? 220 : 120);
+        }
         if (g_ui.client) {
             const auto& chat = g_ui.client->chat();
             int cy = cv.vh() - chat_lines * lh - 2;
@@ -775,12 +859,42 @@ int present_frame(gbarecomp::RunOptions::PresentFrame* frame) {
     return 1;
 }
 
+// Every key and mouse button up (the game's own bindings, WASD, clicks).
+bool all_released(gba::GbaBus* bus) {
+    if (bus && (bus->io().host_keyinput() & 0x03FF) != 0x03FF) return false;
+    if (!SDL_WasInit(SDL_INIT_VIDEO)) return true;
+    if (SDL_GetMouseState(nullptr, nullptr) & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK)) return false;
+    int n = 0;
+    const Uint8* k = SDL_GetKeyboardState(&n);
+    for (int i = 0; i < n; ++i) if (k[i]) return false;
+    return true;
+}
+
 std::uint16_t input_frame(const gbarecomp::TouchFrameInfo* info) {
-    const std::uint16_t keys = g_prev_input ? g_prev_input(info) : 0x03FF;
-    if (!open()) return keys;
-    pump_network();
-    if (open()) handle_input();
-    return 0x03FF;     // the game sees no buttons while the menu is open
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!open() && !g_ui.draining) return g_prev_input ? g_prev_input(info) : 0x03FF;
+    // The menu owns the keyboard and mouse: the game's own key bindings are
+    // hidden from it (they reach the guest beside this hook, so they are
+    // blocked at the source), and the pad controls are not asked at all.
+    if (bus) bus->io().set_host_keys_blocked(true);
+    if (open()) {
+        if (SDL_WasInit(SDL_INIT_VIDEO)) SDL_ShowCursor(SDL_ENABLE);
+        pump_network();
+        if (g_ui.settling && !SDL_WasInit(SDL_INIT_VIDEO)) g_ui.settling = false;   // headless tests
+        if (g_ui.settling) {
+            read_keys(); read_mouse();          // brings their last-seen states up to date
+            if (all_released(bus)) g_ui.settling = false;
+            return 0x03FF;
+        }
+        if (open()) handle_input();
+        return 0x03FF;
+    }
+    gta_mouse_wheel_take();                     // scrolls meant for the menu
+    if (all_released(bus)) {
+        g_ui.draining = false;
+        if (bus) bus->io().set_host_keys_blocked(false);
+    }
+    return 0x03FF;
 }
 
 // String lookup: our ids get our text.
@@ -897,6 +1011,16 @@ int gta_online_tcp_command(const char* request, void (*write)(void*, const char*
     if (const std::string t = field("\"text\""); !t.empty()) g_test_text = t;
     if (const std::string server = field("\"server\""); !server.empty()) g_server = server;
     if (const std::string name = field("\"name\""); !name.empty()) g_name = name;
+    // Pointer tests, in the menu's virtual pixels: {"mx":..,"my":..,"click":1,"right":1,"wheel":-1}
+    auto number = [&](const char* key, int* out) {
+        const char* at = std::strstr(request, key);
+        if (!at || !(at = std::strchr(at + std::strlen(key), ':'))) return false;
+        *out = std::atoi(at + 1);
+        return true;
+    };
+    number("\"mx\"", &g_test_mx); number("\"my\"", &g_test_my);
+    number("\"click\"", &g_test_click); number("\"right\"", &g_test_right);
+    if (int w = 0; number("\"wheel\"", &w)) gta_mouse_wheel_inject(w);
     if (const std::string path = field("\"shot\""); !path.empty()) {
         // The menu over a grey 960x540 picture, as PPM.
         if (gba::GbaBus* bus = gbarecomp::active_bus()) { g_rom = bus->rom_ptr(); g_rom_size = bus->rom_size(); }
@@ -915,9 +1039,15 @@ int gta_online_tcp_command(const char* request, void (*write)(void*, const char*
         }
     }
     char out[256];
-    std::snprintf(out, sizeof(out), "{\"ok\":true,\"screen\":%d,\"cursor\":%d,\"room\":%u,\"rows\":%d,\"hits\":%d}",
+    const int conn = !g_ui.client ? 0 : g_ui.client->state() == RoomClient::State::Connected ? 2 : 1;
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    std::snprintf(out, sizeof(out),
+                  "{\"ok\":true,\"screen\":%d,\"cursor\":%d,\"room\":%u,\"rows\":%d,\"hits\":%d,\"conn\":%d,"
+                  "\"mode\":%d,\"v0\":%d,\"blocked\":%d,\"chat\":%d}",
                   static_cast<int>(g_ui.screen), g_ui.cursor, g_ui.client ? g_ui.client->room() : 0u,
-                  static_cast<int>(rows().size()), static_cast<int>(g_ui.hits.size()));
+                  static_cast<int>(rows().size()), static_cast<int>(g_ui.hits.size()), conn, g_ui.mode,
+                  g_ui.values[0], bus && bus->io().host_keys_blocked() ? 1 : 0,
+                  g_ui.client ? static_cast<int>(g_ui.client->chat().size()) : 0);
     write(ctx, out, std::strlen(out));
     return 1;
 }

@@ -216,20 +216,48 @@ int g_was_screen = 0;       // frames the menu screen has been up
 
 void tap(int bit) { g_tap_bit = bit; g_tap_timer = kHold + kSettle; }
 
+// The wheel only arrives as events; a watch counts the notches.
+std::atomic<int> g_wheel{0};
+int SDLCALL wheel_watch(void*, SDL_Event* e) {
+    if (e->type == SDL_MOUSEWHEEL) {
+        const int y = e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y;
+        g_wheel += y;
+    }
+    return 1;
+}
+
 }  // namespace
+
+int gta_mouse_wheel_take() {
+    static bool watching = false;
+    if (!watching && SDL_WasInit(SDL_INIT_VIDEO)) { SDL_AddEventWatch(wheel_watch, nullptr); watching = true; }
+    return g_wheel.exchange(0);
+}
+
+void gta_mouse_wheel_inject(int notches) { g_wheel += notches; }
 
 bool gta_menu_mouse(std::uint16_t* keys) {
     gba::GbaBus* bus = gbarecomp::active_bus();
     if (!bus) return false;
     const Menu m = detect(bus);
     Pointer p = read_pointer();
-    if (!m.screen) { g_target = -1; g_click = false; g_was_screen = 0; g_tap_timer = 0; return false; }
+    static int wheel = 0;                   // notches not yet turned into presses
+    wheel += gta_mouse_wheel_take();
+    if (!m.screen) { g_target = -1; g_click = false; g_was_screen = 0; g_tap_timer = 0; wheel = 0; return false; }
     // Clicks made while the screen was still appearing are not for it.
-    if (++g_was_screen < 12) p.left = p.right = 0;
+    if (++g_was_screen < 12) { p.left = p.right = 0; wheel = 0; }
+    wheel = std::clamp(wheel, -4, 4);
 
     if (g_tap_timer > 0) {
         if (g_tap_timer > kSettle) *keys &= static_cast<std::uint16_t>(~(1u << g_tap_bit));
         --g_tap_timer;
+        return true;
+    }
+    // The wheel steps through the list: one Up or Down per notch.
+    if (wheel != 0) {
+        g_target = -1; g_click = false;
+        tap(wheel > 0 ? kUp : kDown);
+        wheel += wheel > 0 ? -1 : 1;
         return true;
     }
     if (!p.valid) return true;
