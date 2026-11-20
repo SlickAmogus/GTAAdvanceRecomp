@@ -49,6 +49,13 @@ if(GTA_NETPLAY)
     gbarecomp_target_netplay_identity(GTAAdvanceRecomp "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/generated")
     target_compile_definitions(GTAAdvanceRecomp PRIVATE GTA_NETPLAY=1)
+    # Online rooms (a room server's relay carries the match).
+    target_sources(GTAAdvanceRecomp PRIVATE src/online/room_client.cpp
+        src/online/relay_bridge.cpp src/online/online_match.cpp)
+    target_include_directories(GTAAdvanceRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    if(WIN32)
+        target_link_libraries(GTAAdvanceRecomp PRIVATE ws2_32)
+    endif()
 endif()
 
 # Dear ImGui core + SDL2 backend + the menu model. recomp-ui is C++17 while

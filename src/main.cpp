@@ -6,6 +6,7 @@
 #if defined(GTA_NETPLAY)
 #include "gba_netplay_build_identity.h"
 #include "multiplayer_launch.h"
+#include "online/online_match.h"
 #endif
 #include "mod_function_hooks.h"
 #include "pc_controls.h"
@@ -203,6 +204,16 @@ int main(int argc, char** argv) {
     // The netplay options (--netplay-*) are taken out of the argument list.
     static std::vector<std::string> arg_strings;
     arg_strings.assign(args.begin(), args.end());
+    // An online room (--online-host / --online-join) becomes netplay options
+    // once both players are in it.
+    {
+        std::string online_error;
+        const std::string build_tag = std::string("gtaadv-") + std::string(GBARECOMP_NETPLAY_BUILD_ID).substr(0, 16);
+        if (!gtaonline::prepare_online_match(arg_strings, build_tag, &online_error)) {
+            std::fprintf(stderr, "online: %s\n", online_error.c_str());
+            return 1;
+        }
+    }
     try {
         gbarecomp::parse_gba_netplay_arguments(arg_strings, *opts.netplay);
     } catch (const std::exception& e) {
