@@ -184,6 +184,20 @@ apart from any Silent Hill server on the same machine. With players online it
 asks: continue (warn them, restart in 30 seconds), wait until nobody is on,
 or stop.
 
+To watch and manage the running server from Windows (each asks for the
+server's password and reconnects if the connection drops):
+
+| File | Does |
+|---|---|
+| `server/gta_console.bat` | the admin console: `players`, `kick`, `ban`, `say`, `watch`, `restart`... (`help` lists them) |
+| `server/gta_monitor.bat` | the log live: players joining and leaving, rooms opening and closing, chat. `gta_monitor.bat all` or `gta_monitor.bat 200` shows more history first |
+| `server/gta_log.bat` | downloads the whole log and opens it in Notepad |
+
+The console is sh_master's own, so its banner says Silent Hill Online. It still
+talks only to the GTA instance (admin port 27892). On the server itself the
+same things are `gta-admin --console`, `gta-admin --watch` and `gta-admin log`.
+What players say inside a room is theirs and is not logged; lobby chat is.
+
 ## Repository map
 
 | Path | What |

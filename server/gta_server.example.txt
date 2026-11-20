@@ -11,4 +11,4 @@ source=..\..\..\silenthill-online\silent-hill-decomp
 # Later changes go in ExecStart= of /etc/systemd/system/gta-rooms.service.
 # Its own UDP port (27889) and admin port (27892) keep it apart from a
 # Silent Hill server on the same machine (27888 / 27891).
-args=-p 27889 --admin 27892 -n "GTA Advance rooms" --no-ghosts --no-memos --no-deaths
+args=-p 27889 --admin 27892 -n "GTA Advance rooms" --no-ghosts --no-memos --no-deaths --no-update-check

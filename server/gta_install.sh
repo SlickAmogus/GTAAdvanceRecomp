@@ -23,7 +23,8 @@ UNIT=gta-rooms
 UNIT_FILE=/etc/systemd/system/$UNIT.service
 DIR=/root/gta-rooms
 BIN=$DIR/sh_master
-ARGS='-p 27889 --admin 27892 -n "GTA Advance rooms" --no-ghosts --no-memos --no-deaths'
+ARGS='-p 27889 --admin 27892 -n "GTA Advance rooms" --no-ghosts --no-memos --no-deaths --no-update-check'
+HELPER=/usr/local/bin/gta-admin
 WARN=1
 ASK=1
 while [ $# -gt 0 ]; do
@@ -120,6 +121,29 @@ EOF
     echo ">> created $UNIT_FILE"
     echo "   command line: $BIN $ARGS"
 fi
+# Updates come from gta_redeploy.bat. sh_master's own updater looks for new
+# Silent Hill Online server releases, which would only confuse this instance.
+if ! grep -q '^ExecStart=.*--no-update-check' "$UNIT_FILE"; then
+    sed -i 's/^\(ExecStart=.*\)$/\1 --no-update-check/' "$UNIT_FILE"
+    echo ">> added --no-update-check to $UNIT_FILE"
+fi
+
+# gta-admin: sh_master's admin client aimed at this instance's admin port
+# (read from the unit each time, so a changed --admin is followed).
+#   gta-admin --console      the admin console (players, kick, ban, say, watch...)
+#   gta-admin --watch [N]    the log live
+#   gta-admin --cmd "..."    one command
+#   gta-admin log            print the whole log file
+cat > "$HELPER" <<EOF
+#!/bin/sh
+P="\$(sed -n 's/^ExecStart=.* --admin \([0-9]*\).*/\1/p' $UNIT_FILE)"
+if [ "\$1" = log ]; then
+    L="\$(sed -n 's/^ExecStart=.* --log \([^ ]*\).*/\1/p' $UNIT_FILE)"
+    exec cat "\${L:-$DIR/sh_master.log}"
+fi
+exec $BIN --admin "\${P:-27892}" "\$@"
+EOF
+chmod 755 "$HELPER"
 UDP_PORT="$(grep '^ExecStart=' "$UNIT_FILE" | sed -n 's/.* -p \([0-9]*\).*/\1/p')"
 [ -n "$UDP_PORT" ] || UDP_PORT=27889
 systemctl daemon-reload
@@ -143,4 +167,4 @@ printf '>> service %s is now: ' "$UNIT"; systemctl is-active $UNIT || true
 printf '>> admin console answers: '
 if "$BIN" --admin "$ADMIN_PORT" --cmd players >/dev/null 2>&1; then echo yes; else echo "no (journalctl -u $UNIT -n 50)"; fi
 echo ">> done. The game connects to UDP $UDP_PORT on this machine."
-echo "   admin console: $BIN --admin $ADMIN_PORT --console"
+echo "   admin console: gta-admin --console (gta_console.bat on Windows), live log: gta-admin --watch"
