@@ -19,3 +19,4 @@ gta_pc.ini
 __pycache__/
 *.zip
 recomp_coverage_*.json
+server/gta_server.txt

@@ -1,0 +1,14 @@
+# GTA Advance room server settings. Copy to gta_server.txt (kept out of git).
+#
+# host: the Linux machine gta_redeploy.bat logs in to, as user@address.
+host=root@your.server.example
+#
+# source: the Silent Hill Online checkout the server program is built from
+# (sh_master.c and its headers); relative to this folder or absolute.
+source=..\..\..\silenthill-online\silent-hill-decomp
+#
+# args: the server's command line, used when the service is first created.
+# Later changes go in ExecStart= of /etc/systemd/system/gta-rooms.service.
+# Its own UDP port (27889) and admin port (27892) keep it apart from a
+# Silent Hill server on the same machine (27888 / 27891).
+args=-p 27889 --admin 27892 -n "GTA Advance rooms" --no-ghosts --no-memos --no-deaths
