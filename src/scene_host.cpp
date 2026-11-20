@@ -34,6 +34,9 @@
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "scene/scene.h"
+#if defined(GTA_NETPLAY)
+#include "online/online_ui.h"
+#endif
 
 namespace {
 
@@ -894,17 +897,24 @@ void netplay_setup_instance(gbarecomp::GbaInstance& instance) {
 
 bool netplay_present(gbarecomp::GbaNetplayPresentFrame& frame) {
     g_local_bus = frame.local_bus;
-    advance_display_frame(frame.local_bus);
+    // While waiting for the other player the same frame is shown again.
+    if (!frame.reconnect_seconds) advance_display_frame(frame.local_bus);
     static const int kPercent[] = {100, 75, 50, 33, 25};
     const int pct = kPercent[std::clamp(g_settings.resolution, 0, 4)];
     // The match's fixed shape: 16:9, as tall as the window allows.
     const int h = std::max(160, frame.drawable_height * pct / 100);
     const int w = h * 16 / 9;
-    if (!compose(w, h, 0.0f)) return false;
-    frame.argb = g_frame.data();
-    frame.width = static_cast<unsigned>(w);
-    frame.height = static_cast<unsigned>(h);
-    return true;
+    const bool own = compose(w, h, 0.0f);
+    if (own) {
+        frame.argb = g_frame.data();
+        frame.width = static_cast<unsigned>(w);
+        frame.height = static_cast<unsigned>(h);
+    }
+#if defined(GTA_NETPLAY)
+    return gta_online_match_overlay(frame, own);
+#else
+    return own;
+#endif
 }
 }  // namespace
 

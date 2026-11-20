@@ -158,6 +158,15 @@ automatically to the mode and settings the host chose.
 Your name and the server are in `gta_online.ini` next to the game
 (`name=`, `server=host:port`).
 
+While the match starts, a band at the bottom says SETTING UP THE MATCH with
+a progress bar: the game is walking both consoles through the boot logos and
+its menus (about a minute; the keyboard does nothing until it is done). In a
+match, **Esc twice** leaves it (one Esc only asks), which ends it for both
+players; if the other player's game stops answering, the screen says WAITING
+FOR THE OTHER PLAYER with a countdown. When a match ends either way, the game
+starts again on its own and the ONLINE menu says what happened. A match's
+log is `online.log` next to the game.
+
 Matches use the native renderer, widened to one fixed 16:9 view for both
 players (the widened view changes what the game itself processes, so it has
 to be the same on every PC; a window of another shape gets borders).

@@ -190,6 +190,8 @@ int main(int argc, char** argv) {
     bool display_flag = false;  // the player chose a mode on the command line
     for (int i = 0; i < argc; ++i) {
         if (i > 0 && std::strcmp(argv[i], "--no-launcher") == 0) continue;
+        // Read by the online menu (back from a match); not a runtime option.
+        if (i > 0 && std::strcmp(argv[i], "--online-ended") == 0) { ++i; continue; }
         if (!std::strcmp(argv[i], "--no-window") || !std::strcmp(argv[i], "--frames") ||
             !std::strcmp(argv[i], "--tcp") || !std::strcmp(argv[i], "--replay-diagnostic"))
             scripted = true;
@@ -253,5 +255,10 @@ int main(int argc, char** argv) {
     if (!scripted && !display_flag) gta_pc_controls_startup_args(&remembered);
     for (std::string& s : remembered) args.push_back(s.data());
 
-    return gbarecomp::run_game(static_cast<int>(args.size()), args.data(), opts);
+    const int code = gbarecomp::run_game(static_cast<int>(args.size()), args.data(), opts);
+#if defined(GTA_NETPLAY)
+    // An online match has ended: back to the ordinary game, which says why.
+    gta_online_after_match(code);
+#endif
+    return code;
 }

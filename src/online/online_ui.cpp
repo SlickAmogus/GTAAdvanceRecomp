@@ -5,6 +5,7 @@
 #include "menu_mouse.h"
 
 #include "runtime.h"
+#include "multiplayer_launch.h"
 #include "gba_bus.h"
 #include "mod_function_hooks.h"
 #include "runtime_arm.h"
@@ -304,19 +305,77 @@ std::string opening_script(bool host) {
     press(A, 100);                                      // the link screen
     press(A, 400);                                      // A BUTTON TO CONNECT
     if (!host) return out;
-    for (int i = 0; i < g_ui.mode; ++i) press(DOWN, 60);
+    // Inside the menus a press shows within a few frames (the game reads the
+    // pad every fourth frame), so these go quickly.
+    for (int i = 0; i < g_ui.mode; ++i) press(DOWN, 20);
     press(A, 200);                                      // the mode's menu
     const auto& mode = g_modes[g_ui.mode];
     int row = 0;
     for (std::size_t k = 0; k < mode.settings.size(); ++k) {
-        while (row < static_cast<int>(k) + 1) { press(DOWN, 60); ++row; }
+        while (row < static_cast<int>(k) + 1) { press(DOWN, 16); ++row; }
         const int n = static_cast<int>(mode.settings[k].values.size());
-        for (int i = 1; i < n; ++i) press(LEFT, 50);
-        for (int i = 0; i < g_ui.values[k]; ++i) press(RIGHT, 50);
+        for (int i = 1; i < n; ++i) press(LEFT, 14);
+        for (int i = 0; i < g_ui.values[k]; ++i) press(RIGHT, 14);
     }
-    while (row > 0) { press(UP, 60); --row; }
+    while (row > 0) { press(UP, 16); --row; }
     press(A, 100);                                      // START GAME
     return out;
+}
+
+// Starts this game again with `cmd` and lets it run on its own. It writes to
+// this game's log when there is one, otherwise to online.log beside the game
+// (started afresh when `fresh_log`); it inherits nothing else.
+bool spawn_game(const std::string& cmd, bool fresh_log) {
+    std::fflush(stdout); std::fflush(stderr);
+#if defined(_WIN32)
+    auto usable = [](HANDLE h) { return h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN; };
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE), err = GetStdHandle(STD_ERROR_HANDLE), log = nullptr;
+    if (!usable(out) && !usable(err)) {
+        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+        const std::string path = (std::filesystem::path(g_exe).parent_path() / "online.log").string();
+        log = CreateFileA(path.c_str(), fresh_log ? GENERIC_WRITE : FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          &sa, fresh_log ? CREATE_ALWAYS : OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (log == INVALID_HANDLE_VALUE) log = nullptr;
+        out = err = log;
+    }
+    STARTUPINFOEXA si{}; si.StartupInfo.cb = sizeof(si);
+    std::vector<HANDLE> inherit;
+    for (HANDLE h : {out, err})
+        if (usable(h) && std::find(inherit.begin(), inherit.end(), h) == inherit.end() &&
+            SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT))
+            inherit.push_back(h);
+    std::vector<char> attrs;
+    DWORD flags = 0;
+    if (!inherit.empty()) {
+        SIZE_T size = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+        attrs.resize(size);
+        si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrs.data());
+        if (InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &size) &&
+            UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(),
+                                      inherit.size() * sizeof(HANDLE), nullptr, nullptr)) {
+            flags = EXTENDED_STARTUPINFO_PRESENT;
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdOutput = usable(out) ? out : nullptr;
+            si.StartupInfo.hStdError = usable(err) ? err : nullptr;
+        } else {
+            si.lpAttributeList = nullptr;
+        }
+    }
+    PROCESS_INFORMATION pi{};
+    std::vector<char> line(cmd.begin(), cmd.end()); line.push_back('\0');
+    const std::string dir = std::filesystem::path(g_exe).parent_path().string();
+    const BOOL started = CreateProcessA(nullptr, line.data(), nullptr, nullptr, flags ? TRUE : FALSE, flags,
+                                        nullptr, dir.c_str(), &si.StartupInfo, &pi);
+    if (si.lpAttributeList) DeleteProcThreadAttributeList(si.lpAttributeList);
+    if (log) CloseHandle(log);
+    if (!started) return false;
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    return true;
+#else
+    (void)fresh_log;
+    return std::system((cmd + " &").c_str()) == 0;
+#endif
 }
 
 // Restart this game into the agreed match (online_match.h, --online-resume).
@@ -333,50 +392,10 @@ void restart_into_match() {
     if (!g_save_path.empty()) cmd += " --save-path \"" + g_save_path + "\"";
 #if defined(_WIN32)
     SetEnvironmentVariableA("GBARECOMP_NETPLAY_SCRIPT", script.string().c_str());
-    // The new game writes to the same log as this one (when there is one) and
-    // inherits nothing else: no sockets, no files.
-    STARTUPINFOEXA si{}; si.StartupInfo.cb = sizeof(si);
-    std::vector<HANDLE> inherit;
-    for (DWORD which : {STD_OUTPUT_HANDLE, STD_ERROR_HANDLE}) {
-        const HANDLE h = GetStdHandle(which);
-        if (h && h != INVALID_HANDLE_VALUE && std::find(inherit.begin(), inherit.end(), h) == inherit.end() &&
-            SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT))
-            inherit.push_back(h);
-    }
-    std::vector<char> attrs;
-    DWORD flags = 0;
-    if (!inherit.empty()) {
-        SIZE_T size = 0;
-        InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
-        attrs.resize(size);
-        si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrs.data());
-        if (InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &size) &&
-            UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(),
-                                      inherit.size() * sizeof(HANDLE), nullptr, nullptr)) {
-            flags = EXTENDED_STARTUPINFO_PRESENT;
-            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-            si.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-            si.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-        } else {
-            si.lpAttributeList = nullptr;
-        }
-    }
-    PROCESS_INFORMATION pi{};
-    std::vector<char> line(cmd.begin(), cmd.end()); line.push_back('\0');
-    const std::string dir = std::filesystem::path(g_exe).parent_path().string();
-    std::fflush(stdout); std::fflush(stderr);
-    const BOOL started = CreateProcessA(nullptr, line.data(), nullptr, nullptr, flags ? TRUE : FALSE, flags,
-                                        nullptr, dir.c_str(), &si.StartupInfo, &pi);
-    if (si.lpAttributeList) DeleteProcThreadAttributeList(si.lpAttributeList);
-    if (!started) {
-        show_message("could not restart the game", Screen::Room);
-        return;
-    }
-    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
 #else
     setenv("GBARECOMP_NETPLAY_SCRIPT", script.string().c_str(), 1);
-    if (std::system((cmd + " &").c_str()) != 0) { show_message("could not restart the game", Screen::Room); return; }
 #endif
+    if (!spawn_game(cmd, true)) { show_message("could not restart the game", Screen::Room); return; }
     // Keep the room seat for the new process: no goodbye to the server.
     c.abandon();
     g_ui.client.reset();
@@ -771,7 +790,8 @@ void draw(Canvas& cv) {
         draw_centered(cv, cv.vh() / 2 + 8, "CLICK OR PRESS ENTER", 150);
         break;
     case Screen::Starting:
-        draw_centered(cv, cv.vh() / 2 - 8, "STARTING THE MATCH...", 256, true);
+        draw_centered(cv, cv.vh() / 2 - 16, "STARTING THE MATCH...", 256, true);
+        draw_centered(cv, cv.vh() / 2 + 4, "THE GAME RESTARTS INTO IT", 200);
         break;
     default: {
         const auto r = rows();
@@ -870,8 +890,19 @@ bool all_released(gba::GbaBus* bus) {
     return true;
 }
 
+// Back from a match (--online-ended): what happened, shown once the game runs.
+std::string g_end_message;
+// This process is an online match (--online-resume) and how it ended.
+bool g_in_online_match = false, g_match_ended = false, g_match_left_here = false;
+std::string g_match_end_reason;
+
 std::uint16_t input_frame(const gbarecomp::TouchFrameInfo* info) {
     gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!g_end_message.empty() && bus && !open()) {
+        open_menu();
+        if (open()) show_message(g_end_message, Screen::Main);
+        g_end_message.clear();
+    }
     if (!open() && !g_ui.draining) return g_prev_input ? g_prev_input(info) : 0x03FF;
     // The menu owns the keyboard and mouse: the game's own key bindings are
     // hidden from it (they reach the guest beside this hook, so they are
@@ -980,8 +1011,22 @@ void gta_online_install(gbarecomp::RunOptions* opts, int argc, char** argv, cons
     g_build = build_tag;
     const char* argv0 = argc > 0 ? argv[0] : nullptr;
     // A save chosen on the command line goes with the game into a match.
-    for (int i = 1; i + 1 < argc; ++i)
+    for (int i = 1; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--online-resume")) g_in_online_match = true;
+        if (i + 1 >= argc) continue;
         if (!std::strcmp(argv[i], "--save-path")) g_save_path = argv[i + 1];
+        if (!std::strcmp(argv[i], "--online-ended")) g_end_message = argv[i + 1];
+    }
+    // A match: Esc asks twice before leaving (a single Esc ends it for both
+    // players), and how it ended is kept for gta_online_after_match.
+    if (opts->netplay && opts->netplay->enabled) {
+        opts->netplay->escape_leaves = false;
+        opts->netplay->on_end = [](bool local, const std::string& reason) {
+            g_match_ended = true; g_match_left_here = local; g_match_end_reason = reason;
+            std::fprintf(stderr, "online: match ended (%s) %s\n", local ? "left here" : "not here", reason.c_str());
+            std::fflush(stderr);
+        };
+    }
     std::error_code ec;
     g_exe = std::filesystem::absolute(argv0 ? argv0 : "GTAAdvanceRecomp.exe", ec).string();
 #if defined(_WIN32)
@@ -995,6 +1040,82 @@ void gta_online_install(gbarecomp::RunOptions* opts, int argc, char** argv, cons
     opts->present_frame = present_frame;
     opts->input_frame = input_frame;
     if (g_hooks_registered) gba_mod_set_function_hook_enabled("gta.online", 1);
+}
+
+void gta_online_after_match(int exit_code) {
+    if (!g_in_online_match) return;
+    std::string msg;
+    const std::string& r = g_match_end_reason;
+    if (!g_match_ended) msg = exit_code ? "the match could not start" : "";
+    else if (g_match_left_here) msg = "you left the match";
+    else if (r.find("left") != std::string::npos) msg = "the other player left the match";
+    else if (r.find("startup") != std::string::npos) msg = "the other player's game did not start the match";
+    else if (r.find("timed out") != std::string::npos) msg = "the connection to the other player was lost";
+    else msg = "the match ended: " + r;
+    for (char& ch : msg) if (ch == '"') ch = '\'';
+    std::string cmd = "\"" + g_exe + "\"";
+    if (!msg.empty()) cmd += " --online-ended \"" + msg + "\"";
+    if (!g_save_path.empty()) cmd += " --save-path \"" + g_save_path + "\"";
+    std::fprintf(stderr, "online: back to the game (%s)\n", msg.c_str());
+    // Headless test runs end here.
+    if (const char* v = std::getenv("SDL_VIDEODRIVER"); v && !std::strcmp(v, "dummy")) return;
+    spawn_game(cmd, false);
+}
+
+bool gta_online_match_overlay(gbarecomp::GbaNetplayPresentFrame& frame, bool own) {
+    const bool opening = frame.opening_end && frame.tick <= frame.opening_end;
+    if (!opening && !frame.leave_armed && !frame.reconnect_seconds) return own;
+    if (!frame.local_bus) return own;
+    g_rom = frame.local_bus->rom_ptr(); g_rom_size = frame.local_bus->rom_size();
+    int w, h;
+    if (own) {
+        w = static_cast<int>(frame.width); h = static_cast<int>(frame.height);
+        g_image.assign(frame.argb, frame.argb + static_cast<std::size_t>(w) * h);
+    } else {
+        // The plain picture, scaled by whole pixels.
+        const int gw = static_cast<int>(frame.guest_width), gh = static_cast<int>(frame.guest_height);
+        if (!frame.guest_rgb || gw <= 0 || gh <= 0) return false;
+        const int s = std::clamp(std::min(frame.drawable_width / gw, frame.drawable_height / gh), 1, 6);
+        w = gw * s; h = gh * s;
+        g_image.resize(static_cast<std::size_t>(w) * h);
+        for (int y = 0; y < h; ++y) {
+            const std::uint8_t* src = frame.guest_rgb + static_cast<std::size_t>(y / s) * gw * 3;
+            std::uint32_t* dst = g_image.data() + static_cast<std::size_t>(y) * w;
+            for (int x = 0; x < w; ++x) {
+                const std::uint8_t* p = src + (x / s) * 3;
+                dst[x] = 0xFF000000u | (p[0] << 16) | (p[1] << 8) | p[2];
+            }
+        }
+    }
+    Canvas cv{g_image.data(), w, h, std::max(1, h / 240)};
+    const int vw = cv.vw(), vh = cv.vh();
+    if (opening) {
+        // Bottom band: what is happening, and how far along it is.
+        const int by = vh - 42;
+        cv.shade(0, by, vw, 42, 70);
+        draw_centered(cv, by + 4, "SETTING UP THE MATCH", 256, true);
+        const int bw = std::min(vw - 40, 220), bx = (vw - bw) / 2, bar_y = by + 26;
+        const int fill = static_cast<int>(static_cast<std::uint64_t>(bw - 2) * frame.tick / frame.opening_end);
+        for (int x = 0; x < bw; ++x) { cv.dot(bx + x, bar_y, kRamp[7]); cv.dot(bx + x, bar_y + 7, kRamp[7]); }
+        for (int y = 0; y < 8; ++y) { cv.dot(bx, bar_y + y, kRamp[7]); cv.dot(bx + bw - 1, bar_y + y, kRamp[7]); }
+        for (int y = 1; y < 7; ++y)
+            for (int x = 1; x <= fill; ++x) cv.dot(bx + x, bar_y + y, kRamp[y < 3 ? 1 : y < 5 ? 3 : 5]);
+    }
+    if (frame.reconnect_seconds && !frame.leave_armed) {
+        const int y = vh / 2 - 24;
+        cv.shade(0, y, vw, 48, 60);
+        draw_centered(cv, y + 6, "WAITING FOR THE OTHER PLAYER... " + std::to_string(frame.reconnect_seconds), 256, true);
+        draw_centered(cv, y + 26, "ESC TWICE: LEAVE THE MATCH", 200);
+    }
+    if (frame.leave_armed) {
+        const int y = vh / 2 - 14;
+        cv.shade(0, y, vw, 28, 60);
+        draw_centered(cv, y + 6, "PRESS ESC AGAIN TO LEAVE THE MATCH", 256, true);
+    }
+    frame.argb = g_image.data();
+    frame.width = static_cast<unsigned>(w);
+    frame.height = static_cast<unsigned>(h);
+    return true;
 }
 
 int gta_online_tcp_command(const char* request, void (*write)(void*, const char*, std::size_t), void* ctx) {
