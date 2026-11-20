@@ -29,6 +29,8 @@
 #include "gba_bus.h"
 #include "gba_io.h"
 #include "mod_function_hooks.h"
+#include "multiplayer_launch.h"
+#include "multiplayer_session.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "scene/scene.h"
@@ -53,6 +55,19 @@ constexpr std::uint32_t kAfterRectFns[] = {0x08009832u, 0x0800A0C0u, 0x08010110u
 constexpr std::uint32_t kSpriteRightLimit = 0x08014650u;    // cmp r0, #0xF0
 std::atomic<float> g_wide_factor{1.0f};     // picture width / 240 columns, >= 1
 
+// ---- online matches (netplay) ---------------------------------------------------
+// In a match every PC runs both consoles, and only input travels, so anything
+// that changes what the game does must be the same on every PC: the view is
+// widened to one fixed shape (16:9) for everyone whatever their window, the
+// game's own building drawing is never skipped, and the city CPU discount is
+// not used. What only reads the game (the building list, the latched ticks)
+// listens to this PC's own console only.
+bool g_netplay = false;
+gba::GbaBus* g_local_bus = nullptr;          // this PC's console in a match
+constexpr float kNetplayWideFactor = (16.0f / 9.0f) / 1.5f;
+gba::GbaBus* scene_bus() { return g_local_bus ? g_local_bus : gbarecomp::active_bus(); }
+bool observing(gba::GbaBus* bus) { return bus && (!g_local_bus || bus == g_local_bus); }
+
 void wr32(std::uint8_t* p, std::int32_t v) { std::memcpy(p, &v, 4); }
 std::int32_t rds32(const std::uint8_t* p) { std::int32_t v; std::memcpy(&v, p, 4); return v; }
 
@@ -63,9 +78,9 @@ float world_sprite_shift(const std::uint8_t* iw) {
 }
 
 int widen_hook(std::uint32_t, int, ArmCpuState*) {
-    const float factor = g_wide_factor.load(std::memory_order_relaxed);
+    const float factor = g_netplay ? kNetplayWideFactor : g_wide_factor.load(std::memory_order_relaxed);
     gba::GbaBus* bus = gbarecomp::active_bus();
-    if (!g_settings.native || factor <= 1.001f || !bus) return 0;
+    if ((!g_netplay && !g_settings.native) || factor <= 1.001f || !bus) return 0;
     if ((bus->io().read16(0x000) & 7u) != 1u) return 0;         // city view only
     std::uint8_t* iw = bus->iwram_ptr();
     const std::int32_t x = rds32(iw + 0x14) >> 16, z = rds32(iw + 0x1C) >> 16;
@@ -81,7 +96,7 @@ int widen_hook(std::uint32_t, int, ArmCpuState*) {
 int right_limit_override(std::uint32_t pc, std::uint32_t, std::uint32_t* out) {
     if (pc != kSpriteRightLimit) return 0;
     gba::GbaBus* bus = gbarecomp::active_bus();
-    if (!g_settings.native || !bus) return 0;
+    if ((!g_netplay && !g_settings.native) || !bus) return 0;
     const std::uint8_t* iw = bus->iwram_ptr();
     const float width = (rds32(iw + 0x58) - rds32(iw + 0x50)) * (rds32(iw + 0x60) / 65536.0f);
     if (width <= 244.0f || width > 1000.0f) return 0;
@@ -127,7 +142,7 @@ gtascene::Memory scene_memory(gba::GbaBus* bus) {
 
 int after_sort_hook(std::uint32_t, int, ArmCpuState*) {
     gba::GbaBus* bus = gbarecomp::active_bus();
-    if (!bus) return 0;
+    if (!observing(bus)) return 0;
     const int n = gtascene::read_instances(scene_memory(bus), g_instances, kMaxInstances);
     if (n >= 0) { g_instance_count = n; g_instance_age = 0; }
     return 0;   // observed only
@@ -146,7 +161,7 @@ int skip_function(ArmCpuState* cpu) {
 
 int skip_drawing_hook(std::uint32_t, int, ArmCpuState* cpu) {
     gba::GbaBus* bus = gbarecomp::active_bus();
-    if (!g_settings.native || !bus || !city_view(bus)) return 0;
+    if (g_netplay || !g_settings.native || !bus || !city_view(bus)) return 0;
     return skip_function(cpu);
 }
 
@@ -218,7 +233,8 @@ bool active_city() { gba::GbaBus* b = gbarecomp::active_bus(); return b && city_
 
 int flip_hook(std::uint32_t, int, ArmCpuState*) {
     gba::GbaBus* bus = gbarecomp::active_bus();
-    if (!bus || !city_view(bus)) { g_tick_count = 0; return 0; }
+    if (!observing(bus)) return 0;
+    if (!city_view(bus)) { g_tick_count = 0; return 0; }
     gtascene::View view;
     if (!gtascene::read_view(scene_memory(bus), &view)) { g_tick_count = 0; return 0; }
     g_latched.cam_x = view.cam_x; g_latched.cam_y = view.cam_y; g_latched.cam_z = view.cam_z;
@@ -231,10 +247,11 @@ int flip_hook(std::uint32_t, int, ArmCpuState*) {
 
 const int g_flip_registered = gba_mod_register_function_entry_plugin(kSceneHookId, kFlipFn, 1, flip_hook);
 
+void advance_display_frame(gba::GbaBus* bus);
+
 void frame_start(const gbarecomp::ExtendedViewFrameInfo*) {
+    if (g_netplay) return;
     if (g_scene_registered && g_flip_registered) gba_mod_set_function_hook_enabled(kSceneHookId, 1);
-    ++g_instance_age;
-    ++g_display_frame;
     // A world tick costs the console's CPU three to five display frames, so
     // ticks reach the screen 2 to 6 frames apart and busy streets run slow.
     // In the city the game's CPU time is charged at one eighth: every tick
@@ -242,11 +259,22 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo*) {
     // limit still holds it to 15 a second). Menus and cutscenes keep exact
     // timing.
     g_runtime_cycle_discount_shift = active_city() ? kCityCpuShift : 0u;
+    advance_display_frame(gbarecomp::active_bus());
+    // The runtime disables every entry hook when it activates mod plugins, so
+    // the hook is (re)armed from the per-frame callback.
+    if (g_registered) gba_mod_set_function_hook_enabled(kHookId, 1);
+    g_runtime_thumb_alu_imm_override = right_limit_override;
+}
+
+// Once per displayed frame: a latched tick joins the ring, playback advances.
+void advance_display_frame(gba::GbaBus* bus) {
+    ++g_instance_age;
+    ++g_display_frame;
     if (g_flip_pending) {
         // The picture flip ran during the vertical blank just before this
         // frame: hardware OAM now holds the sprites of the latched tick.
         g_flip_pending = false;
-        if (gba::GbaBus* bus = gbarecomp::active_bus()) {
+        if (bus) {
             Tick& t = g_ticks[g_tick_count % kTickRing];
             t = g_latched;
             std::memcpy(t.oam, bus->oam_ptr(), sizeof(t.oam));
@@ -266,10 +294,6 @@ void frame_start(const gbarecomp::ExtendedViewFrameInfo*) {
         }
     }
     g_play = std::min(g_play + g_play_rate, static_cast<double>(std::max(0, newest_tick())));
-    // The runtime disables every entry hook when it activates mod plugins, so
-    // the hook is (re)armed from the per-frame callback.
-    if (g_registered) gba_mod_set_function_hook_enabled(kHookId, 1);
-    g_runtime_thumb_alu_imm_override = right_limit_override;
 }
 std::vector<std::uint32_t> g_frame;
 std::vector<float> g_depth;
@@ -296,9 +320,12 @@ std::uint32_t colour(std::uint16_t c) {
 // (bottom right) to the right edge; everything else stays centred.
 enum class Anchor { Centre, Left, Right };
 
-Anchor hud_anchor(int x0, int x1, int y0, int y1) {
-    if (x1 <= 80 && y1 <= 64) return Anchor::Left;
-    if (x0 >= 120 && (y1 <= 48 || y0 >= 136)) return Anchor::Right;
+// Decided by where a piece starts, so the two 8-pixel halves of a HUD digit
+// always go together. The status block grows downward in a car (the speed
+// row pushes money, health and wanted stars down a line), so it reaches row 72.
+Anchor hud_anchor(int x0, int x1, int y0, int /*y1*/) {
+    if (x1 <= 80 && y0 < 64) return Anchor::Left;
+    if (x0 >= 120 && (y0 < 72 || y0 >= 136)) return Anchor::Right;
     return Anchor::Centre;
 }
 
@@ -706,8 +733,9 @@ bool mark_player(const std::uint8_t* oam, float shift, bool* marked) {
 // Builds the composite into g_frame. False when the game is not showing the
 // city right now (menus, cutscenes, loading).
 bool compose(int out_w, int out_h, float phase) {
-    gba::GbaBus* bus = gbarecomp::active_bus();
-    if (!g_settings.native || !bus || out_w < 64 || out_h < 48) return false;
+    gba::GbaBus* bus = scene_bus();
+    // A match always uses it: its view is widened for everyone (see g_netplay).
+    if ((!g_netplay && !g_settings.native) || !bus || out_w < 64 || out_h < 48) return false;
     const std::uint16_t dispcnt = bus->io().read16(0x000);
     // The city view is video mode 1 with the building and ground layers on.
     if ((dispcnt & 7u) != 1u || (dispcnt & 0x0500) != 0x0500 || (dispcnt & 0x80)) return false;
@@ -852,6 +880,42 @@ bool find_uint(const char* request, const char* key, unsigned long long* out) {
 }  // namespace
 
 GtaSceneSettings* gta_scene_settings() { return &g_settings; }
+
+namespace {
+// Every console of a match gets the sprite right-edge limit of the widened view.
+// The override is a pure function of that console's own memory (the widened
+// rectangle in IWRAM), so it gives the same answer however the framework
+// batches execution; flagged so it keeps the fast batched path (without the
+// flag a match runs at a few frames a second in the city).
+void netplay_setup_instance(gbarecomp::GbaInstance& instance) {
+    instance.execution.immediate_override = right_limit_override;
+    instance.immediate_override_is_observer = true;
+}
+
+bool netplay_present(gbarecomp::GbaNetplayPresentFrame& frame) {
+    g_local_bus = frame.local_bus;
+    advance_display_frame(frame.local_bus);
+    static const int kPercent[] = {100, 75, 50, 33, 25};
+    const int pct = kPercent[std::clamp(g_settings.resolution, 0, 4)];
+    // The match's fixed shape: 16:9, as tall as the window allows.
+    const int h = std::max(160, frame.drawable_height * pct / 100);
+    const int w = h * 16 / 9;
+    if (!compose(w, h, 0.0f)) return false;
+    frame.argb = g_frame.data();
+    frame.width = static_cast<unsigned>(w);
+    frame.height = static_cast<unsigned>(h);
+    return true;
+}
+}  // namespace
+
+void (*gta_scene_netplay_setup())(gbarecomp::GbaInstance&) { return netplay_setup_instance; }
+
+void gta_scene_netplay(gbarecomp::GbaNetplayLaunch* launch) {
+    g_netplay = true;
+    launch->present_frame = netplay_present;
+    if (g_registered) gba_mod_set_function_hook_enabled(kHookId, 1);
+    if (g_scene_registered && g_flip_registered) gba_mod_set_function_hook_enabled(kSceneHookId, 1);
+}
 
 void gta_scene_install(gbarecomp::RunOptions* opts) {
     opts->present_frame = present_frame;

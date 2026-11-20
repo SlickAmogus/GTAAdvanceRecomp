@@ -156,9 +156,13 @@ automatically to the mode and settings the host chose.
 Your name and the server are in `gta_online.ini` next to the game
 (`name=`, `server=host:port`).
 
+Matches use the native renderer, widened to one fixed 16:9 view for both
+players (the widened view changes what the game itself processes, so it has
+to be the same on every PC; a window of another shape gets borders).
+
 Known limits: chat is in the online menu, not yet during a match; the
 multiplayer modes always play in Portland whatever AREA says (the cut mode
-seems to ignore it); a match shows the original 240x160 picture.
+seems to ignore it).
 
 Direct links without a server work too:
 

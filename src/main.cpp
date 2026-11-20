@@ -207,7 +207,8 @@ int main(int argc, char** argv) {
     // USA cartridge.
     opts.netplay = gbarecomp::make_gba_netplay_launch(
         "gtaadvance-usa", GBARECOMP_NETPLAY_BUILD_ID,
-        "215c574d5afbda0aadbf89dc76b765cfaaeb35953eab63f7687d8bfe8a8e0f4d");
+        "215c574d5afbda0aadbf89dc76b765cfaaeb35953eab63f7687d8bfe8a8e0f4d",
+        gta_scene_netplay_setup());
     opts.netplay->supported_media = 1u << static_cast<unsigned>(gbarecomp::GbaLinkMedium::Cable);
     // The netplay options (--netplay-*) are taken out of the argument list.
     static std::vector<std::string> arg_strings;
@@ -230,6 +231,9 @@ int main(int argc, char** argv) {
     }
     args.clear();
     for (std::string& a : arg_strings) args.push_back(a.data());
+    // A match draws with the native renderer too, its view widened the same
+    // for every console (scene_host.cpp, "online matches").
+    if (opts.netplay->enabled) gta_scene_netplay(opts.netplay.get());
 #endif
     opts.builtin_game_name = "Grand Theft Auto Advance";
     opts.builtin_rom_sha1  = "742fc0062ad930253ffea449953061381577649e";

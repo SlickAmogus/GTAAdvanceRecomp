@@ -17,6 +17,13 @@ GtaSceneSettings* gta_scene_settings();
 // Installs the present-time compositor. Call before gbarecomp::run_game().
 void gta_scene_install(gbarecomp::RunOptions* opts);
 
+// Online matches (netplay): the per-console setup to pass to
+// make_gba_netplay_launch, and the match's renderer (call once the launch is
+// known to be a match: it fixes the widened view for every console).
+namespace gbarecomp { struct GbaInstance; struct GbaNetplayLaunch; }
+void (*gta_scene_netplay_setup())(gbarecomp::GbaInstance&);
+void gta_scene_netplay(gbarecomp::GbaNetplayLaunch* launch);
+
 // Debug TCP only: write the current composite as a PPM. False when the game
 // is not showing the city.
 bool gta_scene_debug_shot(const char* path, int width, int height);
