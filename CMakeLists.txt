@@ -42,6 +42,12 @@ target_sources(GTAAdvanceRecomp PRIVATE src/main.cpp src/pc_controls.cpp
     src/scene_host.cpp src/scene/scene.cpp src/menu_mouse.cpp)
 target_include_directories(GTAAdvanceRecomp PRIVATE
     "${RECOMP_UI_ROOT}/src" ${SDL2_INCLUDE_DIR})
+# Executable icon (assets/icon.ico, made from assets/gtaao.png). SDL also uses
+# the exe's first icon resource for the window and taskbar.
+if(WIN32)
+    enable_language(RC)
+    target_sources(GTAAdvanceRecomp PRIVATE assets/icon.rc)
+endif()
 # The runtime archives reference each other; GNU ld needs them grouped.
 target_link_gbarecomp_runtime_stack(GTAAdvanceRecomp)
 if(GTA_NETPLAY)

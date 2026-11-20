@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/gtaao.png" alt="Grand Theft Auto Advance Online" width="360"></p>
+
 # GTAAdvanceRecomp
 
 A native PC build of **Grand Theft Auto Advance** (GBA, USA, `BGTE`) made by
