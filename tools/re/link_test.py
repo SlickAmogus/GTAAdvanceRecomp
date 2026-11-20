@@ -5,7 +5,8 @@
 Starts seat 0 and seat 1 of one session over 127.0.0.1 (SDL dummy video and
 audio), each with a throwaway save and a scripted pad (both go START, three
 times DOWN to MULTI PLAYER, A, A on the game's CONNECT CABLE screen, then A
-through LIBERTY CITY SURVIVOR and START GAME), and writes each seat's picture every 60 frames to build/link/.
+through LIBERTY CITY SURVIVOR and START GAME; then the two walk toward each other), and writes each seat's
+picture and memory every 60 frames to build/link/.
 """
 import os, pathlib, shutil, subprocess, sys
 
@@ -27,10 +28,10 @@ def script(seat):
     press(A, gap=400)               # A BUTTON TO CONNECT
     press(A, gap=100)               # LIBERTY CITY SURVIVOR
     press(A, gap=100)               # START GAME
-    # Seat 0 stands still; seat 1 walks right for two seconds, then down.
+    # The two players start 1024 units apart, seat 1 above seat 0: they walk
+    # toward each other until they share the screen.
     t += 700
-    if seat == 1:
-        rows.append((t, t + 120, RIGHT)); rows.append((t + 180, t + 300, 0x80))
+    rows.append((t, t + 700, UP if seat == 0 else DOWN))
     return rows
 
 if __name__ == "__main__":
