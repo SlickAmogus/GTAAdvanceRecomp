@@ -148,10 +148,12 @@ GTAAdvanceRecomp --netplay-bind 0.0.0.0:5300 --netplay-peer FRIEND_IP:5301 --net
 GTAAdvanceRecomp --netplay-bind 0.0.0.0:5301 --netplay-peer YOUR_IP:5300 --netplay-seat 1 --netplay-session 4242
 ```
 
-Not finished: both consoles reach the game's CONNECT CABLE screen in step, but
-connecting stops the session ("excessive IRQ depth", the game's serial
-interrupt chain under the virtual cable). An in-game way to host or join
-through the online server comes after that works. `tools/re/link_test.py`
+The shipped interrupt dispatcher has no case for the link's serial and timer 3
+interrupts (likely why the mode was cut: on hardware it locks up the same way).
+Two function hooks route them to the game's own handler (`src/main.cpp`), and
+with that two linked consoles connect and play the same Liberty City Survivor
+round. Not finished: an in-game way to host or join through the online server.
+The title menu also offers the developer mission select, PICK LEVEL (CHEAT). `tools/re/link_test.py`
 runs two linked copies on one PC with scripted input.
 
 ## Repository map

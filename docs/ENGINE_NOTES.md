@@ -157,6 +157,14 @@ settings entries follow it. The serial code is `0x08065428..0x080666A4`
 flag (`EWRAM 0x02000D08`) is set, and the player code picks the local player
 through a flag at `+0xC` of `EWRAM 0x02010C60`.
 
+The crt0 interrupt dispatcher (ARM `0x08000104`, copied to EWRAM `0x020004D0`
+and installed from the literal at `0x08000410`) tests VBlank, VCount, HBlank,
+timers 0-2, DMA, keypad and cartridge, but not timer 3 or serial, although its
+nesting mask (`0x20C0`) is the multi-player SIO one. The link's handler
+`0x08066554` is never referenced. The link runs on the serial interrupt for the
+handshake and then on timer 3 (`0x08066220`: IE serial off, timer 3 on,
+reload `0xABFB`), with that same handler serving each tick.
+
 ## Ground
 
 World units to ground texels: multiply by `0x28 / 64 = 0.625`. One tile is 8

@@ -30,6 +30,12 @@ name = "irq_dispatch"
 note = "crt0 stores this address at 0x03007FFC; handler table at 0x02000170"
 
 [[extra_func]]
+addr = 0x08066554
+mode = "thumb"
+name = "link_serial_irq"
+note = "the link's serial interrupt handler; nothing in the shipped game calls it (see src/main.cpp)"
+
+[[extra_func]]
 addr = 0x08000430
 mode = "thumb"
 name = "main"
@@ -226,6 +232,18 @@ note = "stackless function reached through a pointer"
 # and 0x08010110 (the last call of 0x08008BC4). While the native renderer
 # shows a picture wider than 3:2 the hook widens the rectangle. The hooked
 # functions always run unchanged.
+# The cut link-cable multiplayer: the interrupt dispatcher has no serial case.
+# See serial_match_hook in src/main.cpp.
+[[mod_function_hook]]
+addr = 0x080001AC
+mode = "arm"
+note = "IRQ dispatcher after the source match: serial given its own slot"
+
+[[mod_function_hook]]
+addr = 0x08000734
+mode = "thumb"
+note = "empty IRQ handler: continues into the serial handler 0x08066554 for that slot"
+
 [[mod_function_hook]]
 addr = 0x08009832
 mode = "thumb"
