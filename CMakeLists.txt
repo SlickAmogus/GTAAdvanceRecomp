@@ -51,7 +51,7 @@ if(GTA_NETPLAY)
     target_compile_definitions(GTAAdvanceRecomp PRIVATE GTA_NETPLAY=1)
     # Online rooms (a room server's relay carries the match).
     target_sources(GTAAdvanceRecomp PRIVATE src/online/room_client.cpp
-        src/online/relay_bridge.cpp src/online/online_match.cpp)
+        src/online/relay_bridge.cpp src/online/online_match.cpp src/online/online_ui.cpp)
     target_include_directories(GTAAdvanceRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     if(WIN32)
         target_link_libraries(GTAAdvanceRecomp PRIVATE ws2_32)

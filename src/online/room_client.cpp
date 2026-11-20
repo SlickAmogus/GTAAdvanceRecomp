@@ -27,8 +27,9 @@ namespace {
 // Wire format: a 12-byte header ("SHO1", version 1, type, u16 payload
 // length, u32 session), then the payload; integers little-endian, strings
 // fixed-width and zero-padded. 1200 bytes at most per datagram.
-constexpr int kHeader = 12, kMtu = 1200, kNameMax = 24, kBuildMax = 24;
+constexpr int kHeader = 12, kMtu = 1200, kNameMax = 24, kBuildMax = 24, kChatMax = 160;
 enum : std::uint8_t {
+    kChatSay = 0x35, kChatMsg = 0x36,
     kHello = 0x01, kWelcome = 0x02, kPing = 0x03, kBye = 0x05, kReject = 0x06, kChallenge = 0x07,
     kRoomCreate = 0x60, kRoomJoin = 0x61, kRoomLeave = 0x62, kRoomListReq = 0x63,
     kRoomJoined = 0x64, kRoomRoster = 0x65, kRoomReject = 0x66, kRoomList = 0x67, kRelay = 0x68,
@@ -95,8 +96,10 @@ std::uint64_t now_ms() {
 RoomClient::RoomClient() : sock_(kNoSocket) {}
 RoomClient::~RoomClient() { disconnect(); }
 
-bool RoomClient::connect(const std::string& server, const std::string& name, const std::string& build) {
+bool RoomClient::connect(const std::string& server, const std::string& name, const std::string& build,
+                         std::uint32_t reconnect) {
     disconnect();
+    reconnect_ = reconnect;
     error_.clear();
     if (!net_started()) { error_ = "networking unavailable"; state_ = State::Failed; return false; }
     std::string host = server, port = std::to_string(kDefaultPort);
@@ -141,6 +144,38 @@ void RoomClient::disconnect() {
     room_ = 0; members_.clear();
 }
 
+void RoomClient::abandon() {
+    if (sock_ != kNoSocket) {
+        GTA_CLOSE(static_cast<decltype(socket(0, 0, 0))>(sock_));
+        sock_ = kNoSocket;
+    }
+    state_ = State::Idle;
+}
+
+void RoomClient::add_chat(const std::string& from, const std::string& text, bool room) {
+    chat_.push_back({from, text, room, now_ms()});
+    if (chat_.size() > 50) chat_.erase(chat_.begin());
+    ++chat_serial_;
+}
+
+void RoomClient::say(const std::string& text, bool room) {
+    if (text.empty() || state_ != State::Connected) return;
+    std::string line = text.substr(0, kChatMax - 1);
+    if (room) {
+        // Inside the room: a control note, kind 3, then the text.
+        std::string note(1, '\x03');
+        note += line;
+        if (!send_relay(kControl, note.data(), static_cast<int>(note.size()))) return;
+        add_chat(name_, line, true);
+        return;
+    }
+    // scope (0 = everyone on the server), pad, pad16, text.
+    std::uint8_t p[4 + kChatMax];
+    Writer w{p, 0};
+    w.u8(0); w.u8(0); w.u16(0); w.str(line, kChatMax);
+    send_message(kChatSay, p, w.at);
+}
+
 void RoomClient::send_message(std::uint8_t type, const std::uint8_t* payload, int len) {
     if (sock_ == kNoSocket || len < 0 || kHeader + len > kMtu) return;
     std::uint8_t buf[kMtu];
@@ -155,7 +190,7 @@ void RoomClient::send_hello() {
     // cookie, install id, capabilities (none: the plain room and list rows).
     std::uint8_t p[2 + 1 + 1 + 4 + kNameMax + kBuildMax + 4 + 4 + 4 + 4];
     Writer w{p, 0};
-    w.u16(1); w.u8(0); w.u8(0); w.u32(0);
+    w.u16(1); w.u8(0); w.u8(0); w.u32(reconnect_);
     w.str(name_, kNameMax); w.str(build_, kBuildMax);
     w.u32(0); w.u32(cookie_); w.u32(0); w.u32(0);
     send_message(kHello, p, w.at);
@@ -218,18 +253,30 @@ void RoomClient::handle(const std::uint8_t* data, int len) {
         state_ = State::Failed;
         break;
     }
+    case kChatMsg: {
+        // scope, pad, pad16, sender id, sender name, text (more may follow).
+        r.u8(); r.u8(); r.u16();
+        const std::uint32_t from = r.u32();
+        std::string who = r.str(kNameMax), text = r.str(kChatMax);
+        if (!r.ok() || text.empty()) break;
+        if (from == 0 && who.empty()) who = "SERVER";
+        add_chat(who, text, false);
+        break;
+    }
     case kRoomJoined: read_roster(data + kHeader, payload, true); break;
     case kRoomRoster: read_roster(data + kHeader, payload, false); break;
     case kRoomReject: r.u8(); room_error_ = r.str(96); break;
     case kRoomList: {
         const unsigned n = r.u8();
-        // The row size follows from the datagram (newer servers may add fields).
-        const int rows_bytes = payload - 1 - 2;
-        const int row = n ? rows_bytes / static_cast<int>(n) : 0;
-        if (n && row < 2 + 1 + 1 + kNameMax) break;
-        const int page_at = 1 + static_cast<int>(n) * row;
-        Reader pr{data + kHeader, payload, page_at};
-        if (pr.u8() == 0) listing_.clear();
+        // Rows are code, players, seats, host name, map (29 bytes for a client
+        // that asks for no extras); newer servers add a page number and a
+        // "more" flag after them, older ones do not.
+        const int row = 2 + 1 + 1 + kNameMax + 1;
+        const int trailer = payload - 1 - static_cast<int>(n) * row;
+        if (trailer != 0 && trailer != 2) break;
+        int page = 0;
+        if (trailer) { Reader pr{data + kHeader, payload, 1 + static_cast<int>(n) * row}; page = static_cast<int>(pr.u8()); }
+        if (page == 0) listing_.clear();
         for (unsigned i = 0; i < n; ++i) {
             Reader e{data + kHeader, payload, 1 + static_cast<int>(i) * row};
             RoomListing l;

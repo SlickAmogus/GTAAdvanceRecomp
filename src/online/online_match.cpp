@@ -27,19 +27,63 @@ std::uint32_t get32(const std::uint8_t* p) {
 
 }  // namespace
 
+// Hands the room to the relay bridge and adds the netplay options for it.
+static bool start_bridge(std::unique_ptr<RoomClient> client, std::uint32_t peer, bool host,
+                         std::uint32_t session, std::vector<std::string>& args, std::string* error) {
+    client->on_relay = nullptr;
+    g_bridge = std::make_unique<RelayBridge>(std::move(client));
+    if (!g_bridge->start(peer)) { *error = g_bridge->error(); g_bridge.reset(); return false; }
+    args.push_back("--netplay-bind");
+    args.push_back("127.0.0.1:" + std::to_string(g_bridge->netplay_port()));
+    args.push_back("--netplay-peer");
+    args.push_back("127.0.0.1:" + std::to_string(g_bridge->bridge_port()));
+    args.push_back("--netplay-seat");
+    args.push_back(host ? "0" : "1");
+    args.push_back("--netplay-session");
+    args.push_back(std::to_string(session));
+    return true;
+}
+
 bool prepare_online_match(std::vector<std::string>& args, const std::string& build_tag, std::string* error) {
     std::string server = kDefaultServer, name = "Player";
     bool host = false;
     long code = -1;
+    unsigned long resume = 0, seat = 0, peer_id = 0, match = 0, room = 0;
     std::vector<std::string> kept;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
         const bool has_value = i + 1 < args.size();
+        auto number = [&] { return std::strtoul(args[++i].c_str(), nullptr, 10); };
         if (i > 0 && a == "--online-host") host = true;
         else if (i > 0 && a == "--online-join" && has_value) code = std::strtol(args[++i].c_str(), nullptr, 10);
         else if (i > 0 && a == "--online-server" && has_value) server = args[++i];
         else if (i > 0 && a == "--online-name" && has_value) name = args[++i];
+        // The game restarted into an agreed match (the in-game ONLINE menu):
+        // the room session, this player's seat, the other player, the match id.
+        else if (i > 0 && a == "--online-resume" && has_value) resume = number();
+        else if (i > 0 && a == "--online-seat" && has_value) seat = number();
+        else if (i > 0 && a == "--online-peer" && has_value) peer_id = number();
+        else if (i > 0 && a == "--online-match" && has_value) match = number();
+        else if (i > 0 && a == "--online-room" && has_value) room = number();
         else kept.push_back(a);
+    }
+    if (resume) {
+        args = std::move(kept);
+        std::fprintf(stderr, "online: resuming room session %lu at %llu\n", resume,
+                     static_cast<unsigned long long>(now_ms())); std::fflush(stderr);
+        if (!peer_id || !match) { *error = "incomplete match details"; return false; }
+        auto client = std::make_unique<RoomClient>();
+        if (!client->connect(server, name, build_tag, static_cast<std::uint32_t>(resume))) {
+            *error = client->error(); return false;
+        }
+        while (client->state() == RoomClient::State::Connecting) client->wait_and_pump(20);
+        if (client->state() != RoomClient::State::Connected) { *error = client->error(); return false; }
+        if (client->session() != resume) { *error = "the room was gone when the game restarted"; return false; }
+        client->resume_room(static_cast<std::uint16_t>(room ? room : 1),
+                            seat == 0 ? client->my_id() : static_cast<std::uint32_t>(peer_id));
+        std::fprintf(stderr, "online: back in the room, match %08lx (seat %lu)\n", match, seat); std::fflush(stderr);
+        return start_bridge(std::move(client), static_cast<std::uint32_t>(peer_id), seat == 0,
+                            static_cast<std::uint32_t>(match), args, error);
     }
     if (!host && code < 0) return true;
     args = std::move(kept);
@@ -96,19 +140,7 @@ bool prepare_online_match(std::vector<std::string>& args, const std::string& bui
         for (int k = 0; k < 5; ++k) { client->send_relay(RoomClient::kControl, note, 5); client->wait_and_pump(30); }
     }
     std::fprintf(stderr, "online: match %08x starts (peer %u)\n", session, peer); std::fflush(stderr);
-
-    client->on_relay = nullptr;
-    g_bridge = std::make_unique<RelayBridge>(std::move(client));
-    if (!g_bridge->start(peer)) { *error = g_bridge->error(); g_bridge.reset(); return false; }
-    args.push_back("--netplay-bind");
-    args.push_back("127.0.0.1:" + std::to_string(g_bridge->netplay_port()));
-    args.push_back("--netplay-peer");
-    args.push_back("127.0.0.1:" + std::to_string(g_bridge->bridge_port()));
-    args.push_back("--netplay-seat");
-    args.push_back(host ? "0" : "1");
-    args.push_back("--netplay-session");
-    args.push_back(std::to_string(session));
-    return true;
+    return start_bridge(std::move(client), peer, host, session, args, error);
 }
 
 }  // namespace gtaonline

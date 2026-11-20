@@ -37,9 +37,24 @@ public:
     RoomClient& operator=(const RoomClient&) = delete;
 
     // "host:port" (port defaults to kDefaultPort). The build tag must match
-    // between players for the server to put them in one room.
-    bool connect(const std::string& server, const std::string& name, const std::string& build);
+    // between players for the server to put them in one room. `reconnect`
+    // resumes an earlier session of this player from the same address (room
+    // membership included), as after the game restarts into a match.
+    bool connect(const std::string& server, const std::string& name, const std::string& build,
+                 std::uint32_t reconnect = 0);
     void disconnect();
+    // Drops the socket without telling the server: the session (and room
+    // seat) waits for a reconnect, or times out after 15 seconds.
+    void abandon();
+    std::uint32_t session() const { return session_; }
+
+    // Chat. Server-wide lines go through the server (it allows one line every
+    // ten seconds per player); room lines travel inside the room.
+    struct ChatLine { std::string from, text; bool room = false; std::uint64_t at_ms = 0; };
+    void say(const std::string& text, bool room);
+    const std::vector<ChatLine>& chat() const { return chat_; }
+    unsigned chat_serial() const { return chat_serial_; }
+    void add_chat(const std::string& from, const std::string& text, bool room);
 
     // Never blocks: sends what is due, reads what arrived.
     void pump();
@@ -64,6 +79,10 @@ public:
     unsigned listing_serial() const { return listing_serial_; }
     // The last room refusal ("room is full"), cleared on the next request.
     const std::string& room_error() const { return room_error_; }
+    void clear_room_error() { room_error_.clear(); }
+    // After a reconnect the server keeps the session's room but does not say
+    // so again; the caller who knows it says it here.
+    void resume_room(std::uint16_t code, std::uint32_t host) { room_ = code; host_id_ = host; }
 
     // Relay: `kind` picks one of two channels (kGame for netplay datagrams,
     // kControl for this game's own notes). to = 0 sends to every other member.
@@ -89,6 +108,9 @@ private:
     std::vector<RoomMember> members_;
     std::vector<RoomListing> listing_;
     unsigned listing_serial_ = 0;
+    std::vector<ChatLine> chat_;
+    unsigned chat_serial_ = 0;
+    std::uint32_t reconnect_ = 0;
     std::uint64_t next_hello_ms_ = 0, next_ping_ms_ = 0, connect_deadline_ms_ = 0;
 };
 

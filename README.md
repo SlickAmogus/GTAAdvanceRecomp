@@ -129,32 +129,56 @@ an entry to select it, left click to choose it, right click to go back. On
 screens without a list (dialogue, title) a left click continues. The pointer
 is hidden while you are in the city.
 
-## Multiplayer (work in progress)
+## Multiplayer and online
 
 The cartridge still contains the link-cable multiplayer the game was built
 with: Liberty City Survivor, City Circuit, Car Jack Crazy and Special
-Delivery, each with its settings (area, time limit, frag limit / laps / cars /
+Delivery, each with its settings (time limit, frag limit / laps / cars /
 packages, AI opponents, weapons) and a "CONNECT CABLE" handshake. None of it
 is reachable in the shipped game. This build puts **MULTI PLAYER** back on the
-title menu (a data-only change to the menu tables, see `src/main.cpp`).
+title menu (data-only changes to the menu tables, `src/main.cpp`). The shipped
+interrupt dispatcher has no case for the link's serial and timer 3 interrupts
+(likely why the mode was cut: on hardware it locks up the same way); two
+function hooks route them to the game's own handler. The title menu also
+offers the developer mission select, PICK LEVEL (CHEAT).
 
-Without a second console the modes run on their own (with AI opponents). The
-build includes the framework's link-cable netplay, where every player runs
-both GBAs and only controller input travels, so two copies can be linked over
-the network by command line:
+**ONLINE** (title menu and hideout) opens a menu in the game's font: host a
+game, find games, join by a room code, set your name, chat, and, as the host,
+pick the mode and its settings and start. Rooms live on a room server (an
+`sh_master` from Silent Hill Online, run as its own instance; `server/`
+deploys one). When the host starts, both games restart straight into the
+match: a link match must begin from a fresh boot on both consoles. The
+framework's netplay runs both consoles on each PC, only controller input
+travels (through the room server's relay, so nobody opens a port), and each
+player sees only their own console. The game's menus are stepped through
+automatically to the mode and settings the host chose.
+
+Your name and the server are in `gta_online.ini` next to the game
+(`name=`, `server=host:port`).
+
+Known limits: chat is in the online menu, not yet during a match; the
+multiplayer modes always play in Portland whatever AREA says (the cut mode
+seems to ignore it); a match shows the original 240x160 picture.
+
+Direct links without a server work too:
 
 ```
 GTAAdvanceRecomp --netplay-bind 0.0.0.0:5300 --netplay-peer FRIEND_IP:5301 --netplay-seat 0 --netplay-session 4242
 GTAAdvanceRecomp --netplay-bind 0.0.0.0:5301 --netplay-peer YOUR_IP:5300 --netplay-seat 1 --netplay-session 4242
 ```
 
-The shipped interrupt dispatcher has no case for the link's serial and timer 3
-interrupts (likely why the mode was cut: on hardware it locks up the same way).
-Two function hooks route them to the game's own handler (`src/main.cpp`), and
-with that two linked consoles connect and play the same Liberty City Survivor
-round. Not finished: an in-game way to host or join through the online server.
-The title menu also offers the developer mission select, PICK LEVEL (CHEAT). `tools/re/link_test.py`
-runs two linked copies on one PC with scripted input.
+`tools/re/link_test.py` runs two linked copies on one PC with scripted input,
+`tools/re/online_test.py SERVER` the same through a room server.
+
+### Running the room server
+
+`server/gta_redeploy.bat` installs or updates it on a Linux machine over ssh
+(copy `server/gta_server.example.txt` to `server/gta_server.txt` and set
+`host=`). It builds `sh_master` from a Silent Hill Online checkout (`source=`)
+and runs it as the `gta-rooms` service on UDP 27889 (admin console on 27892),
+apart from any Silent Hill server on the same machine. With players online it
+asks: continue (warn them, restart in 30 seconds), wait until nobody is on,
+or stop.
 
 ## Repository map
 

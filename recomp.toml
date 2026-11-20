@@ -244,6 +244,17 @@ addr = 0x08000734
 mode = "thumb"
 note = "empty IRQ handler: continues into the serial handler 0x08066554 for that slot"
 
+# The ONLINE menu (src/online/online_ui.cpp).
+[[mod_function_hook]]
+addr = 0x0805E330
+mode = "thumb"
+note = "string lookup: the new ONLINE label's id answered with its text"
+
+[[mod_function_hook]]
+addr = 0x08065E5C
+mode = "thumb"
+note = "link handshake: ONLINE on the title menu opens the online menu instead"
+
 [[mod_function_hook]]
 addr = 0x08009832
 mode = "thumb"

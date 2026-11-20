@@ -25,7 +25,7 @@ class Game:
     def __init__(self, port=19851, extra=(), env=None):
         e = dict(os.environ, GBARECOMP_DIAGNOSTICS="0")
         e.update(env or {})
-        self.log = open(ROOT / "build" / "drive.log", "w")
+        self.log = open(ROOT / "build" / ("drive.log" if port == 19851 else f"drive_{port}.log"), "w")
         # Never the player's own save: every scripted run gets a throwaway
         # copy (a script that walks into SAVE GAME would overwrite theirs).
         self.save_file = ROOT / "build" / f"drive_{port}.sav"

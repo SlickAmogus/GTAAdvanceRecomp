@@ -7,6 +7,7 @@
 #include "gba_netplay_build_identity.h"
 #include "multiplayer_launch.h"
 #include "online/online_match.h"
+#include "online/online_ui.h"
 #endif
 #include "mod_function_hooks.h"
 #include "pc_controls.h"
@@ -90,6 +91,10 @@ static gbarecomp::ModRomDataResult restore_multiplayer_menu(std::uint8_t* rom, s
     // copy then targets ROM and is dropped, like any write there.
     if (u32(0x00000410) == 0x020004D0u && u32(0x0000040C) == 0x08000104u)
         put32(0x00000410, 0x08000104u);
+#if defined(GTA_NETPLAY)
+    // ONLINE on the title menu and in the hideout (src/online/online_ui.cpp).
+    gta_online_prepare_rom(rom, size);
+#endif
     put32(kMultiMenu + 8, 0x08000000u + kTitleMenu);      // parent: back to the title menu
     return gbarecomp::ModRomDataResult::Prepared;
 }
@@ -170,6 +175,9 @@ static int debug_tcp_command(const char* request,
         write(write_ctx, kOk, sizeof(kOk) - 1);
         return 1;
     }
+#if defined(GTA_NETPLAY)
+    if (gta_online_tcp_command(request, write, write_ctx)) return 1;
+#endif
     return gta_menu_tcp_command(request, write, write_ctx) ||
            gta_debug_tcp_command(request, write, write_ctx);
 }
@@ -206,9 +214,9 @@ int main(int argc, char** argv) {
     arg_strings.assign(args.begin(), args.end());
     // An online room (--online-host / --online-join) becomes netplay options
     // once both players are in it.
+    const std::string build_tag = std::string("gtaadv-") + std::string(GBARECOMP_NETPLAY_BUILD_ID).substr(0, 16);
     {
         std::string online_error;
-        const std::string build_tag = std::string("gtaadv-") + std::string(GBARECOMP_NETPLAY_BUILD_ID).substr(0, 16);
         if (!gtaonline::prepare_online_match(arg_strings, build_tag, &online_error)) {
             std::fprintf(stderr, "online: %s\n", online_error.c_str());
             return 1;
@@ -233,6 +241,9 @@ int main(int argc, char** argv) {
     if (g_link_irq_registered) gba_mod_set_function_hook_enabled("gta.link_irq", 1);
     gta_scene_install(&opts);
     gta_pc_controls_install(&opts, argv[0]);
+#if defined(GTA_NETPLAY)
+    gta_online_install(&opts, argc, argv, build_tag);
+#endif
 
     std::vector<std::string> remembered;
     if (!scripted && !display_flag) gta_pc_controls_startup_args(&remembered);
