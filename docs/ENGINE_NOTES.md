@@ -165,6 +165,20 @@ nesting mask (`0x20C0`) is the multi-player SIO one. The link's handler
 handshake and then on timer 3 (`0x08066220`: IE serial off, timer 3 on,
 reload `0xABFB`), with that same handler serving each tick.
 
+### Rampages and the link
+
+A skull pickup (`0x0804C374`) calls `0x0806219C` to start a rampage; it
+stores the rampage's parameters at `EWRAM 0x02010C7E..84`, posts event `0x5E`
+through `0x080591F8` and answers 1, and only then is the pickup used up. The
+city's event dispatcher `0x0805E634` runs the pending event (u16 at
+`0x02010C7C`, jump table at `0x0805E680` indexed by event - 0x11); `0x5E`
+lands at `0x0805E85C`, which calls the rampage setup `0x08060C78` (text id
+557, "USE %A TO KILL %9 GANG MEMBERS."). In a link match the console taking a
+skull stops serving the cable: the other freezes, the taker goes black, and
+both end on LINK ERROR (`0x08065F9C`, text id 455), which waits for B and goes
+to the main menu. Dropping only the event was not enough. The port makes
+`0x0806219C` answer 0 while the link flag is set.
+
 ## Ground
 
 World units to ground texels: multiply by `0x28 / 64 = 0.625`. One tile is 8

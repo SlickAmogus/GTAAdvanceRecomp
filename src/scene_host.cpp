@@ -901,8 +901,11 @@ bool netplay_present(gbarecomp::GbaNetplayPresentFrame& frame) {
     if (!frame.reconnect_seconds) advance_display_frame(frame.local_bus);
     static const int kPercent[] = {100, 75, 50, 33, 25};
     const int pct = kPercent[std::clamp(g_settings.resolution, 0, 4)];
-    // The match's fixed shape: 16:9, as tall as the window allows.
-    const int h = std::max(160, frame.drawable_height * pct / 100);
+    // The match's fixed shape: 16:9, as tall as the window allows, at most
+    // 1080 lines (the window scales it up). Each PC runs both consoles in a
+    // match, and a slow present holds up both players: at 1440 lines the
+    // picture alone made over a third of the frames late in a two-copy test.
+    const int h = std::clamp(frame.drawable_height * pct / 100, 160, 1080);
     const int w = h * 16 / 9;
     const bool own = compose(w, h, 0.0f);
     if (own) {

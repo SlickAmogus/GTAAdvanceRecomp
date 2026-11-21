@@ -10,6 +10,9 @@
 #include "online/online_ui.h"
 #endif
 #include "mod_function_hooks.h"
+#include "gba_bus.h"
+#include "runtime_bus_bridge.h"
+#include "runtime_arm.h"
 #include "pc_controls.h"
 #include "menu_mouse.h"
 #include "scene_host.h"
@@ -20,6 +23,13 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#if defined(_WIN32)
+#include <cstdint>
+#include <windows.h>
+#endif
+#if !defined(GTA_NETPLAY)
+#define GBARECOMP_NETPLAY_BUILD_ID "single-player"
+#endif
 
 // The ground is the mode-1 affine layer (BG2), drawn zoomed. Letting the
 // runtime sample it at the window's resolution sharpens it when the player
@@ -151,6 +161,35 @@ int serial_handler_hook(std::uint32_t, int, ArmCpuState* cpu) {
 const int g_link_irq_registered =
     gba_mod_register_function_entry_plugin("gta.link_irq", kIrqAfterMatch, 0, serial_match_hook) &&
     gba_mod_register_function_entry_plugin("gta.link_irq", kEmptyHandler, 1, serial_handler_hook);
+
+// No rampages in a link match. A skull pickup (0x0804C374) asks 0x0806219C
+// to start a rampage, which posts event 0x5E; the pickup is used up only if
+// that answers 1. In a link match the console that takes one stops serving
+// the cable and both end on LINK ERROR (seen in a two-copy test: a City
+// Circuit start lies beside a skull, and street gangs push an idle player
+// onto it). While the link is up (EWRAM 0x02000D08, the game's own flag) the
+// function answers 0 without running, so the skull stays and nothing starts.
+// Decided from the console's own memory, so every linked console and every
+// replayed frame does the same.
+constexpr std::uint32_t kStartRampage = 0x0806219Cu, kLinkFlag = 0x02000D08u;
+
+int no_rampage_hook(std::uint32_t, int, ArmCpuState* cpu) {
+    gba::GbaBus* bus = gbarecomp::active_bus();
+    if (!bus) return 0;
+    std::uint16_t link;
+    std::memcpy(&link, bus->ewram_ptr() + (kLinkFlag - 0x02000000u), 2);
+    if (!link) return 0;
+    // Return to the caller as the function's own `bx lr` would, popping the
+    // generated call-return entry a direct call pushed.
+    const std::uint32_t ret = cpu->R[14] & ~1u;
+    runtime_call_should_return(ret);
+    cpu->R[0] = 0;
+    cpu->R[15] = ret;
+    return 1;
+}
+
+const int g_mp_event_registered =
+    gba_mod_register_function_entry_plugin("gta.mp_events", kStartRampage, 1, no_rampage_hook);
 }  // namespace
 
 // Game-owned debug server commands (headless testing).
@@ -182,7 +221,54 @@ static int debug_tcp_command(const char* request,
            gta_debug_tcp_command(request, write, write_ctx);
 }
 
+#if defined(_WIN32)
+// A crash leaves crash.log (exception, address inside the exe) and crash.dmp
+// beside the game, so a report from another PC can be traced. (The runtime's
+// own fatal errors already append to crash.log.)
+LONG WINAPI write_crash_report(EXCEPTION_POINTERS* info) {
+    static volatile LONG once = 0;
+    if (InterlockedExchange(&once, 1)) return EXCEPTION_CONTINUE_SEARCH;
+    char exe[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return EXCEPTION_CONTINUE_SEARCH;
+    std::string dir(exe);
+    dir.erase(dir.find_last_of("\\/") + 1);
+    const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
+    const auto* rec = info ? info->ExceptionRecord : nullptr;
+    const auto at = rec ? reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress) : 0;
+    if (std::FILE* f = std::fopen((dir + "crash.log").c_str(), "a")) {
+        SYSTEMTIME t; GetLocalTime(&t);
+        std::fprintf(f, "%04u-%02u-%02u %02u:%02u:%02u crash: exception 0x%08lX at %p (exe+0x%llX)",
+                     t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond,
+                     rec ? static_cast<unsigned long>(rec->ExceptionCode) : 0ul, reinterpret_cast<void*>(at),
+                     static_cast<unsigned long long>(at - base));
+        if (rec && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2)
+            std::fprintf(f, ", %s 0x%llX", rec->ExceptionInformation[0] ? "writing" : "reading",
+                         static_cast<unsigned long long>(rec->ExceptionInformation[1]));
+        std::fprintf(f, "\n  build %s\n\n", GBARECOMP_NETPLAY_BUILD_ID);
+        std::fclose(f);
+    }
+    using DumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
+    if (HMODULE dbghelp = LoadLibraryA("dbghelp.dll")) {
+        if (auto dump = reinterpret_cast<DumpFn>(reinterpret_cast<void*>(GetProcAddress(dbghelp, "MiniDumpWriteDump")))) {
+            HANDLE file = CreateFileA((dir + "crash.dmp").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file != INVALID_HANDLE_VALUE) {
+                struct { DWORD thread; EXCEPTION_POINTERS* pointers; BOOL client; } exc{GetCurrentThreadId(), info, FALSE};
+                dump(GetCurrentProcess(), GetCurrentProcessId(), file, 0 /* MiniDumpNormal */,
+                     info ? &exc : nullptr, nullptr, nullptr);
+                CloseHandle(file);
+            }
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+    SetUnhandledExceptionFilter(write_crash_report);
+#endif
     // Launcher-seam flags are sent by framework tooling (replay_diagnostic.py)
     // to every title; this host has no launcher, so drop them.
     std::vector<char*> args;
@@ -245,6 +331,7 @@ int main(int argc, char** argv) {
     opts.prepare_mod_rom_data = restore_multiplayer_menu;
     opts.tcp_command = debug_tcp_command;
     if (g_link_irq_registered) gba_mod_set_function_hook_enabled("gta.link_irq", 1);
+    if (g_mp_event_registered) gba_mod_set_function_hook_enabled("gta.mp_events", 1);
     gta_scene_install(&opts);
     gta_pc_controls_install(&opts, argv[0]);
 #if defined(GTA_NETPLAY)

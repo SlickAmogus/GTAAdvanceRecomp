@@ -309,3 +309,8 @@ note = "per-instance display list rasteriser: skipped under the native renderer"
 addr = 0x080127EC
 mode = "thumb"
 note = "picture flip: camera latched with the tick's sprites (observed only)"
+
+[[mod_function_hook]]
+addr = 0x0806219C
+mode = "thumb"
+note = "start a rampage: answers 0 while the link is up (main.cpp)"

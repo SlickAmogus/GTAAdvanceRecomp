@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -382,18 +383,29 @@ bool spawn_game(const std::string& cmd, bool fresh_log) {
 void restart_into_match() {
     RoomClient& c = *g_ui.client;
     const bool host = c.is_host();
+    // Both consoles' menu walk ("seat first last mask"): each PC runs the
+    // whole opening alone at full speed, then the match starts in the mode.
     const std::filesystem::path script = std::filesystem::temp_directory_path() /
-        ("gta_online_" + std::to_string(g_ui.match) + (host ? "_0" : "_1") + ".script");
-    { std::ofstream out(script, std::ios::trunc); out << opening_script(host); }
+        ("gta_online_" + std::to_string(g_ui.match) + (host ? "_0" : "_1") + ".opening");
+    {
+        std::ofstream out(script, std::ios::trunc);
+        for (int seat = 0; seat < 2; ++seat) {
+            std::istringstream rows(opening_script(seat == 0));
+            for (std::string row; std::getline(rows, row);)
+                if (!row.empty()) out << seat << ' ' << row << '\n';
+        }
+    }
     std::string cmd = "\"" + g_exe + "\" --online-server \"" + g_server + "\" --online-name \"" + g_name +
         "\" --online-resume " + std::to_string(c.session()) + " --online-seat " + (host ? "0" : "1") +
         " --online-peer " + std::to_string(g_ui.peer) + " --online-match " + std::to_string(g_ui.match) +
         " --online-room " + std::to_string(c.room());
     if (!g_save_path.empty()) cmd += " --save-path \"" + g_save_path + "\"";
 #if defined(_WIN32)
-    SetEnvironmentVariableA("GBARECOMP_NETPLAY_SCRIPT", script.string().c_str());
+    SetEnvironmentVariableA("GBARECOMP_NETPLAY_OPENING", script.string().c_str());
+    SetEnvironmentVariableA("GBARECOMP_NETPLAY_SCRIPT", nullptr);
 #else
-    setenv("GBARECOMP_NETPLAY_SCRIPT", script.string().c_str(), 1);
+    setenv("GBARECOMP_NETPLAY_OPENING", script.string().c_str(), 1);
+    unsetenv("GBARECOMP_NETPLAY_SCRIPT");
 #endif
     if (!spawn_game(cmd, true)) { show_message("could not restart the game", Screen::Room); return; }
     // Keep the room seat for the new process: no goodbye to the server.
